@@ -10,6 +10,7 @@ using MediaBrowser.Controller.Persistence;
 using MediaBrowser.Controller.Plugins;
 using MediaBrowser.Model.Logging;
 using MediaBrowser.Model.Serialization;
+using MediaBrowser.Model.Tasks;
 
 namespace ETKMediaInfoBridge
 {
@@ -44,6 +45,7 @@ namespace ETKMediaInfoBridge
         private readonly ILibraryManager libraryManager;
         private readonly IItemRepository itemRepository;
         private readonly IJsonSerializer jsonSerializer;
+        private readonly ITaskManager taskManager;
         private readonly ILogger logger;
         private readonly ConcurrentDictionary<long, CancellationTokenSource> pending =
             new ConcurrentDictionary<long, CancellationTokenSource>();
@@ -53,18 +55,94 @@ namespace ETKMediaInfoBridge
             ILibraryManager libraryManager,
             IItemRepository itemRepository,
             IJsonSerializer jsonSerializer,
+            ITaskManager taskManager,
             ILogger logger)
         {
             this.libraryManager = libraryManager;
             this.itemRepository = itemRepository;
             this.jsonSerializer = jsonSerializer;
+            this.taskManager = taskManager;
             this.logger = logger;
         }
 
         public void Run()
         {
             this.libraryManager.ItemUpdated += this.OnItemUpdated;
+            this.taskManager.TaskCompleted += this.OnTaskCompleted;
+            _ = Task.Run(this.RefreshIntroSnapshotsAsync);
             this.logger.Info("ETK MediaInfo refresh restore is active.", Array.Empty<object>());
+        }
+
+        private void OnTaskCompleted(object sender, TaskCompletionEventArgs eventArgs)
+        {
+            if (string.Equals(eventArgs?.Task?.Name, "Extract Intro Fingerprint", StringComparison.OrdinalIgnoreCase))
+            {
+                _ = Task.Run(this.RefreshIntroSnapshotsAsync);
+            }
+        }
+
+        private async Task RefreshIntroSnapshotsAsync()
+        {
+            try
+            {
+                var episodes = this.libraryManager.GetItemList(new InternalItemsQuery
+                {
+                    Recursive = true,
+                    IncludeItemTypes = new[] { "Episode" }
+                });
+                var captured = 0;
+                var notified = 0;
+                var failed = 0;
+                foreach (var episode in episodes)
+                {
+                    var chapters = this.itemRepository.GetChapters(
+                        episode.InternalId,
+                        IntroChapterSnapshotStore.MarkerTypes,
+                        CancellationToken.None);
+                    if (IntroChapterSnapshotStore.Store(episode.InternalId, chapters))
+                    {
+                        captured++;
+                        try
+                        {
+                            var mediaInfoUrl = ResolveMediaInfoUrl(episode.Path);
+                            if (string.IsNullOrEmpty(mediaInfoUrl))
+                            {
+                                continue;
+                            }
+                            using (var response = await HttpClient.PostAsync(
+                                BuildIntroSyncUrl(mediaInfoUrl, episode.InternalId),
+                                new StringContent(string.Empty)).ConfigureAwait(false))
+                            {
+                                if (response.IsSuccessStatusCode)
+                                {
+                                    notified++;
+                                }
+                                else
+                                {
+                                    failed++;
+                                }
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            failed++;
+                            this.logger.Debug(
+                                "ETK MediaInfo intro snapshot notify failed for Item {0}: {1}",
+                                episode.InternalId,
+                                ex.Message);
+                        }
+                    }
+                }
+                this.logger.Info(
+                    "ETK MediaInfo captured {0} intro snapshots and notified ETK for {1} episodes ({2} failed).",
+                    captured,
+                    notified,
+                    failed);
+            }
+            catch (Exception ex)
+            {
+                this.logger.ErrorException("ETK MediaInfo intro snapshot refresh failed.", ex);
+            }
         }
 
         private void OnItemUpdated(object sender, ItemChangeEventArgs eventArgs)
@@ -118,7 +196,6 @@ namespace ETKMediaInfoBridge
             {
                 return;
             }
-            mediaInfoUrl = AppendEmbyItemId(mediaInfoUrl, item.InternalId);
 
             var cancellation = new CancellationTokenSource();
             this.pending.AddOrUpdate(
@@ -167,7 +244,8 @@ namespace ETKMediaInfoBridge
                         this.itemRepository,
                         itemId,
                         payload?.MediaSourceInfo,
-                        payload?.Chapters);
+                        payload?.Chapters,
+                        IntroChapterSnapshotStore.Get(itemId));
                     this.logger.Info(
                         "ETK MediaInfo restored after refresh for Item {0}: {1} streams.",
                         itemId,
@@ -249,10 +327,12 @@ namespace ETKMediaInfoBridge
             return (end < 0 ? value : value.Substring(0, end)).Trim();
         }
 
-        private static string AppendEmbyItemId(string mediaInfoUrl, long itemId)
+        private static string BuildIntroSyncUrl(string mediaInfoUrl, long itemId)
         {
-            var separator = mediaInfoUrl.IndexOf('?') >= 0 ? "&" : "?";
-            return mediaInfoUrl + separator + "emby_item_id=" + itemId;
+            var queryIndex = mediaInfoUrl.IndexOf('?');
+            var path = queryIndex < 0 ? mediaInfoUrl : mediaInfoUrl.Substring(0, queryIndex);
+            var query = queryIndex < 0 ? "?" : mediaInfoUrl.Substring(queryIndex) + "&";
+            return path.TrimEnd('/') + "/intro-sync" + query + "emby_item_id=" + itemId;
         }
 
         public void Dispose()
@@ -263,6 +343,7 @@ namespace ETKMediaInfoBridge
             }
             this.disposed = true;
             this.libraryManager.ItemUpdated -= this.OnItemUpdated;
+            this.taskManager.TaskCompleted -= this.OnTaskCompleted;
             foreach (var cancellation in this.pending.Values)
             {
                 try

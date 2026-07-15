@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
+using System.Collections.Concurrent;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Net;
 using MediaBrowser.Controller.Persistence;
@@ -11,6 +12,47 @@ using MediaBrowser.Model.Services;
 
 namespace ETKMediaInfoBridge
 {
+    internal static class IntroChapterSnapshotStore
+    {
+        private static readonly ConcurrentDictionary<long, List<ChapterInfo>> Snapshots =
+            new ConcurrentDictionary<long, List<ChapterInfo>>();
+
+        public static readonly MarkerType[] MarkerTypes =
+            { MarkerType.IntroStart, MarkerType.IntroEnd };
+
+        public static List<ChapterInfo> Get(long itemId)
+        {
+            return Snapshots.TryGetValue(itemId, out var chapters)
+                ? chapters.ToList()
+                : new List<ChapterInfo>();
+        }
+
+        public static bool Store(long itemId, IEnumerable<ChapterInfo> chapters)
+        {
+            var introChapters = (chapters ?? Enumerable.Empty<ChapterInfo>())
+                .Where(IsIntroChapter)
+                .ToList();
+            if (!HasCompleteIntro(introChapters))
+            {
+                return false;
+            }
+            Snapshots[itemId] = introChapters;
+            return true;
+        }
+
+        public static bool HasCompleteIntro(IEnumerable<ChapterInfo> chapters)
+        {
+            var values = (chapters ?? Enumerable.Empty<ChapterInfo>()).ToList();
+            return MarkerTypes.All(marker => values.Any(chapter => chapter.MarkerType == marker));
+        }
+
+        public static bool IsIntroChapter(ChapterInfo chapter)
+        {
+            return chapter != null
+                && (chapter.MarkerType == MarkerType.IntroStart || chapter.MarkerType == MarkerType.IntroEnd);
+        }
+    }
+
     [Route("/Items/{Id}/ETKMediaInfo", "POST", Summary = "Imports ETK media information")]
     [Authenticated(Roles = "Admin")]
     public sealed class ApplyEtkMediaInfo : IReturn<ApplyEtkMediaInfoResult>
@@ -63,7 +105,8 @@ namespace ETKMediaInfoBridge
             IItemRepository itemRepository,
             long itemId,
             MediaSourceInfo source,
-            List<ChapterInfo> chapters)
+            List<ChapterInfo> chapters,
+            List<ChapterInfo> introSnapshot = null)
         {
             var item = libraryManager.GetItemById(itemId);
             if (item == null)
@@ -93,8 +136,40 @@ namespace ETKMediaInfoBridge
             }
             itemRepository.SaveMediaStreams(item.InternalId, streams, CancellationToken.None);
 
-            chapters = chapters ?? new List<ChapterInfo>();
-            itemRepository.SaveChapters(item.InternalId, chapters);
+            var existingChapters = itemRepository.GetChapters(item, CancellationToken.None)
+                ?? new List<ChapterInfo>();
+            var incomingChapters = (chapters ?? new List<ChapterInfo>())
+                .Where(chapter => !IntroChapterSnapshotStore.IsIntroChapter(chapter))
+                .ToList();
+            var incomingIntro = (chapters ?? new List<ChapterInfo>())
+                .Where(IntroChapterSnapshotStore.IsIntroChapter)
+                .ToList();
+            var existingIntro = existingChapters
+                .Where(IntroChapterSnapshotStore.IsIntroChapter)
+                .ToList();
+            var snapshotIntro = introSnapshot ?? new List<ChapterInfo>();
+            var preservedIntro = IntroChapterSnapshotStore.HasCompleteIntro(existingIntro)
+                ? existingIntro
+                : IntroChapterSnapshotStore.HasCompleteIntro(snapshotIntro)
+                    ? snapshotIntro
+                    : IntroChapterSnapshotStore.HasCompleteIntro(incomingIntro)
+                        ? incomingIntro
+                        : new List<ChapterInfo>();
+            if (incomingChapters.Count > 0)
+            {
+                incomingChapters.AddRange(preservedIntro);
+                itemRepository.SaveChapters(item.InternalId, incomingChapters);
+                existingChapters = incomingChapters;
+            }
+            else if (!IntroChapterSnapshotStore.HasCompleteIntro(existingIntro) && preservedIntro.Count > 0)
+            {
+                existingChapters = existingChapters
+                    .Where(chapter => !IntroChapterSnapshotStore.IsIntroChapter(chapter))
+                    .Concat(preservedIntro)
+                    .ToList();
+                itemRepository.SaveChapters(item.InternalId, existingChapters);
+            }
+            IntroChapterSnapshotStore.Store(item.InternalId, existingChapters);
 
             item.RunTimeTicks = source.RunTimeTicks;
             if (source.Size.HasValue)
@@ -126,7 +201,7 @@ namespace ETKMediaInfoBridge
             {
                 ItemId = item.InternalId,
                 StreamCount = streams.Count,
-                ChapterCount = chapters.Count,
+                ChapterCount = existingChapters.Count,
                 PreservedExternalStreamCount = externalStreams.Count
             };
         }
