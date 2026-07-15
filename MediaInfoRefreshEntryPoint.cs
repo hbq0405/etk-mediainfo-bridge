@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Concurrent;
-using System.IO;
 using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
@@ -105,7 +104,7 @@ namespace ETKMediaInfoBridge
                         captured++;
                         try
                         {
-                            var mediaInfoUrl = ResolveMediaInfoUrl(episode.Path);
+                            var mediaInfoUrl = EtkMetadataClient.ResolveMediaInfoUrl(episode.Path);
                             if (string.IsNullOrEmpty(mediaInfoUrl))
                             {
                                 continue;
@@ -193,7 +192,7 @@ namespace ETKMediaInfoBridge
             string mediaInfoUrl;
             try
             {
-                mediaInfoUrl = ResolveMediaInfoUrl(item.Path);
+                mediaInfoUrl = EtkMetadataClient.ResolveMediaInfoUrl(item.Path);
             }
             catch (Exception ex)
             {
@@ -291,58 +290,6 @@ namespace ETKMediaInfoBridge
                 }
                 cancellation.Dispose();
             }
-        }
-
-        private static string ResolveMediaInfoUrl(string itemPath)
-        {
-            if (string.IsNullOrWhiteSpace(itemPath))
-            {
-                return null;
-            }
-
-            var mediaUrl = itemPath.Trim();
-            if (!mediaUrl.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
-                && !mediaUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
-            {
-                if (!mediaUrl.EndsWith(".strm", StringComparison.OrdinalIgnoreCase) || !File.Exists(mediaUrl))
-                {
-                    return null;
-                }
-                mediaUrl = File.ReadAllText(mediaUrl).Trim();
-            }
-
-            const string playMarker = "/api/p115/play/";
-            var markerIndex = mediaUrl.IndexOf(playMarker, StringComparison.OrdinalIgnoreCase);
-            if (markerIndex >= 0)
-            {
-                var value = FirstPathSegment(mediaUrl.Substring(markerIndex + playMarker.Length));
-                return string.IsNullOrEmpty(value)
-                    ? null
-                    : mediaUrl.Substring(0, markerIndex) + "/api/p115/mediainfo/" + value;
-            }
-
-            const string virtualMarker = "/api/p115/virtual-play/";
-            markerIndex = mediaUrl.IndexOf(virtualMarker, StringComparison.OrdinalIgnoreCase);
-            if (markerIndex < 0)
-            {
-                return null;
-            }
-            var virtualPath = mediaUrl.Substring(markerIndex + virtualMarker.Length);
-            var separator = virtualPath.IndexOf('/');
-            if (separator < 0)
-            {
-                return null;
-            }
-            var sha1 = FirstPathSegment(virtualPath.Substring(separator + 1));
-            return string.IsNullOrEmpty(sha1)
-                ? null
-                : mediaUrl.Substring(0, markerIndex) + "/api/p115/mediainfo/sha1/" + sha1;
-        }
-
-        private static string FirstPathSegment(string value)
-        {
-            var end = value.IndexOfAny(new[] { '/', '?', '#' });
-            return (end < 0 ? value : value.Substring(0, end)).Trim();
         }
 
         private async Task NotifyItemReadyAsync(string mediaInfoUrl, long itemId)

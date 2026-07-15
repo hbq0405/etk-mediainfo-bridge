@@ -9,7 +9,7 @@ namespace ETKMediaInfoBridge
     {
         public override string Name => "ETK MediaInfo Bridge";
 
-        public override string Description => "将 ETK 格式化媒体信息写入 Emby，并在刷新后自动恢复。";
+        public override string Description => "从 ETK 恢复 Emby 的元数据、图片、媒体流和章节。";
 
         public override Guid Id => new Guid("27f69312-8cb8-4b59-88d1-4077fc8c86d4");
 
