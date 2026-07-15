@@ -67,7 +67,7 @@ namespace ETKMediaInfoBridge
 
         public void Run()
         {
-            this.libraryManager.ItemAdded += this.OnItemUpdated;
+            this.libraryManager.ItemAdded += this.OnItemAdded;
             this.libraryManager.ItemUpdated += this.OnItemUpdated;
             this.taskManager.TaskCompleted += this.OnTaskCompleted;
             _ = Task.Run(this.RefreshIntroSnapshotsAsync);
@@ -173,7 +173,17 @@ namespace ETKMediaInfoBridge
             this.ScheduleRestore(item);
         }
 
-        private void ScheduleRestore(BaseItem item)
+        private void OnItemAdded(object sender, ItemChangeEventArgs eventArgs)
+        {
+            var item = eventArgs?.Item;
+            if (this.disposed || item == null || MediaInfoRefreshGuard.IsSuppressed(item.InternalId))
+            {
+                return;
+            }
+            this.ScheduleRestore(item, dropConflictingExternalStreams: true);
+        }
+
+        private void ScheduleRestore(BaseItem item, bool dropConflictingExternalStreams = false)
         {
             if (item == null || MediaInfoRefreshGuard.IsSuppressed(item.InternalId))
             {
@@ -213,13 +223,18 @@ namespace ETKMediaInfoBridge
                     }
                     return cancellation;
                 });
-            _ = this.RestoreAfterRefreshAsync(item.InternalId, mediaInfoUrl, cancellation);
+            _ = this.RestoreAfterRefreshAsync(
+                item.InternalId,
+                mediaInfoUrl,
+                cancellation,
+                dropConflictingExternalStreams);
         }
 
         private async Task RestoreAfterRefreshAsync(
             long itemId,
             string mediaInfoUrl,
-            CancellationTokenSource cancellation)
+            CancellationTokenSource cancellation,
+            bool dropConflictingExternalStreams)
         {
             var slotAcquired = false;
             try
@@ -246,7 +261,8 @@ namespace ETKMediaInfoBridge
                         itemId,
                         payload?.MediaSourceInfo,
                         payload?.Chapters,
-                        IntroChapterSnapshotStore.Get(itemId));
+                        IntroChapterSnapshotStore.Get(itemId),
+                        dropConflictingExternalStreams);
                     this.logger.Info(
                         "ETK MediaInfo restored after refresh for Item {0}: {1} streams.",
                         itemId,
@@ -370,7 +386,7 @@ namespace ETKMediaInfoBridge
                 return;
             }
             this.disposed = true;
-            this.libraryManager.ItemAdded -= this.OnItemUpdated;
+            this.libraryManager.ItemAdded -= this.OnItemAdded;
             this.libraryManager.ItemUpdated -= this.OnItemUpdated;
             this.taskManager.TaskCompleted -= this.OnTaskCompleted;
             foreach (var cancellation in this.pending.Values)

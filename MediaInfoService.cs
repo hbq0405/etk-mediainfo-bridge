@@ -63,6 +63,8 @@ namespace ETKMediaInfoBridge
         public MediaSourceInfo MediaSourceInfo { get; set; }
 
         public List<ChapterInfo> Chapters { get; set; }
+
+        public bool DropConflictingExternalStreams { get; set; }
     }
 
     public sealed class ApplyEtkMediaInfoResult
@@ -94,7 +96,8 @@ namespace ETKMediaInfoBridge
                 this.itemRepository,
                 request.Id,
                 request.MediaSourceInfo,
-                request.Chapters);
+                request.Chapters,
+                dropConflictingExternalStreams: request.DropConflictingExternalStreams);
         }
     }
 
@@ -106,7 +109,8 @@ namespace ETKMediaInfoBridge
             long itemId,
             MediaSourceInfo source,
             List<ChapterInfo> chapters,
-            List<ChapterInfo> introSnapshot = null)
+            List<ChapterInfo> introSnapshot = null,
+            bool dropConflictingExternalStreams = false)
         {
             var item = libraryManager.GetItemById(itemId);
             if (item == null)
@@ -126,14 +130,36 @@ namespace ETKMediaInfoBridge
                     CancellationToken.None)
                 .Where(stream => stream.IsExternal)
                 .ToList();
+            var usedIndexes = new HashSet<int>(streams.Select(stream => stream.Index));
+            var nextIndex = usedIndexes.Count == 0 ? 0 : usedIndexes.Max() + 1;
+            var preservedExternalStreamCount = 0;
 
             foreach (var externalStream in externalStreams)
             {
-                if (!streams.Any(stream => IsSameExternalStream(stream, externalStream)))
+                if (streams.Any(stream => IsSameExternalStream(stream, externalStream)))
                 {
-                    streams.Add(externalStream);
+                    continue;
                 }
+                if (usedIndexes.Contains(externalStream.Index))
+                {
+                    if (dropConflictingExternalStreams)
+                    {
+                        continue;
+                    }
+                    while (usedIndexes.Contains(nextIndex))
+                    {
+                        nextIndex++;
+                    }
+                    externalStream.Index = nextIndex++;
+                }
+                usedIndexes.Add(externalStream.Index);
+                streams.Add(externalStream);
+                preservedExternalStreamCount++;
             }
+            itemRepository.SaveMediaStreams(
+                item.InternalId,
+                new List<MediaStream>(),
+                CancellationToken.None);
             itemRepository.SaveMediaStreams(item.InternalId, streams, CancellationToken.None);
 
             var existingChapters = itemRepository.GetChapters(item, CancellationToken.None)
@@ -202,7 +228,7 @@ namespace ETKMediaInfoBridge
                 ItemId = item.InternalId,
                 StreamCount = streams.Count,
                 ChapterCount = existingChapters.Count,
-                PreservedExternalStreamCount = externalStreams.Count
+                PreservedExternalStreamCount = preservedExternalStreamCount
             };
         }
 
