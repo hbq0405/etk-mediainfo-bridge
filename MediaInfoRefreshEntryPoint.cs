@@ -4,6 +4,7 @@ using System.IO;
 using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
+using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Persistence;
 using MediaBrowser.Controller.Plugins;
@@ -70,6 +71,32 @@ namespace ETKMediaInfoBridge
         {
             var item = eventArgs?.Item;
             if (this.disposed || item == null || MediaInfoRefreshGuard.IsSuppressed(item.InternalId))
+            {
+                return;
+            }
+
+            var itemType = item.GetType().Name;
+            if (string.Equals(itemType, "Series", StringComparison.Ordinal)
+                || string.Equals(itemType, "Season", StringComparison.Ordinal))
+            {
+                foreach (var episode in this.libraryManager.GetItemList(new InternalItemsQuery
+                {
+                    Parent = item,
+                    Recursive = true,
+                    IncludeItemTypes = new[] { "Episode" }
+                }))
+                {
+                    this.ScheduleRestore(episode);
+                }
+                return;
+            }
+
+            this.ScheduleRestore(item);
+        }
+
+        private void ScheduleRestore(BaseItem item)
+        {
+            if (item == null || MediaInfoRefreshGuard.IsSuppressed(item.InternalId))
             {
                 return;
             }
