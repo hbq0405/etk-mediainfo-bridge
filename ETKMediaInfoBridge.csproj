@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <AssemblyName>ETKMediaInfoBridge</AssemblyName>
+    <RootNamespace>ETKMediaInfoBridge</RootNamespace>
+    <Version>1.1.1</Version>
+    <Nullable>disable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="MediaBrowser.Server.Core" Version="4.9.1.90" PrivateAssets="all" />
+  </ItemGroup>
+</Project>
