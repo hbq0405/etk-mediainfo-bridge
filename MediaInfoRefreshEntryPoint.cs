@@ -67,6 +67,7 @@ namespace ETKMediaInfoBridge
 
         public void Run()
         {
+            this.libraryManager.ItemAdded += this.OnItemUpdated;
             this.libraryManager.ItemUpdated += this.OnItemUpdated;
             this.taskManager.TaskCompleted += this.OnTaskCompleted;
             _ = Task.Run(this.RefreshIntroSnapshotsAsync);
@@ -110,7 +111,7 @@ namespace ETKMediaInfoBridge
                                 continue;
                             }
                             using (var response = await HttpClient.PostAsync(
-                                BuildIntroSyncUrl(mediaInfoUrl, episode.InternalId),
+                                BuildCallbackUrl(mediaInfoUrl, "intro-sync", episode.InternalId),
                                 new StringContent(string.Empty)).ConfigureAwait(false))
                             {
                                 if (response.IsSuccessStatusCode)
@@ -250,6 +251,7 @@ namespace ETKMediaInfoBridge
                         "ETK MediaInfo restored after refresh for Item {0}: {1} streams.",
                         itemId,
                         result.StreamCount);
+                    await this.NotifyItemReadyAsync(mediaInfoUrl, itemId).ConfigureAwait(false);
                 }
             }
             catch (OperationCanceledException)
@@ -327,12 +329,38 @@ namespace ETKMediaInfoBridge
             return (end < 0 ? value : value.Substring(0, end)).Trim();
         }
 
-        private static string BuildIntroSyncUrl(string mediaInfoUrl, long itemId)
+        private async Task NotifyItemReadyAsync(string mediaInfoUrl, long itemId)
+        {
+            try
+            {
+                using (var response = await HttpClient.PostAsync(
+                    BuildCallbackUrl(mediaInfoUrl, "item-ready", itemId),
+                    new StringContent(string.Empty)).ConfigureAwait(false))
+                {
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        this.logger.Debug(
+                            "ETK MediaInfo Item {0} ready notification returned HTTP {1}.",
+                            itemId,
+                            (int)response.StatusCode);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                this.logger.Debug(
+                    "ETK MediaInfo Item {0} ready notification failed: {1}",
+                    itemId,
+                    ex.Message);
+            }
+        }
+
+        private static string BuildCallbackUrl(string mediaInfoUrl, string action, long itemId)
         {
             var queryIndex = mediaInfoUrl.IndexOf('?');
             var path = queryIndex < 0 ? mediaInfoUrl : mediaInfoUrl.Substring(0, queryIndex);
             var query = queryIndex < 0 ? "?" : mediaInfoUrl.Substring(queryIndex) + "&";
-            return path.TrimEnd('/') + "/intro-sync" + query + "emby_item_id=" + itemId;
+            return path.TrimEnd('/') + "/" + action + query + "emby_item_id=" + itemId;
         }
 
         public void Dispose()
@@ -342,6 +370,7 @@ namespace ETKMediaInfoBridge
                 return;
             }
             this.disposed = true;
+            this.libraryManager.ItemAdded -= this.OnItemUpdated;
             this.libraryManager.ItemUpdated -= this.OnItemUpdated;
             this.taskManager.TaskCompleted -= this.OnTaskCompleted;
             foreach (var cancellation in this.pending.Values)
