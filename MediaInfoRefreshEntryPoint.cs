@@ -24,16 +24,11 @@ namespace ETKMediaInfoBridge
 
         public static bool IsSuppressed(long itemId)
         {
-            if (!SuppressedUntil.TryGetValue(itemId, out var until))
+            if (!SuppressedUntil.TryRemove(itemId, out var until))
             {
                 return false;
             }
-            if (until > DateTime.UtcNow)
-            {
-                return true;
-            }
-            SuppressedUntil.TryRemove(itemId, out _);
-            return false;
+            return until > DateTime.UtcNow;
         }
     }
 
@@ -96,6 +91,7 @@ namespace ETKMediaInfoBridge
             {
                 return;
             }
+            mediaInfoUrl = AppendEmbyItemId(mediaInfoUrl, item.InternalId);
 
             var cancellation = new CancellationTokenSource();
             this.pending.AddOrUpdate(
@@ -224,6 +220,12 @@ namespace ETKMediaInfoBridge
         {
             var end = value.IndexOfAny(new[] { '/', '?', '#' });
             return (end < 0 ? value : value.Substring(0, end)).Trim();
+        }
+
+        private static string AppendEmbyItemId(string mediaInfoUrl, long itemId)
+        {
+            var separator = mediaInfoUrl.IndexOf('?') >= 0 ? "&" : "?";
+            return mediaInfoUrl + separator + "emby_item_id=" + itemId;
         }
 
         public void Dispose()
