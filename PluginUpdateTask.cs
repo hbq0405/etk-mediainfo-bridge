@@ -6,6 +6,7 @@ using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using MediaBrowser.Common;
+using MediaBrowser.Common.Configuration;
 using MediaBrowser.Model.Logging;
 using MediaBrowser.Model.Tasks;
 
@@ -18,11 +19,16 @@ namespace ETKMediaInfoBridge
 
         private static readonly HttpClient HttpClient = CreateHttpClient();
         private readonly IApplicationHost applicationHost;
+        private readonly IApplicationPaths applicationPaths;
         private readonly ILogger logger;
 
-        public PluginUpdateTask(IApplicationHost applicationHost, ILogger logger)
+        public PluginUpdateTask(
+            IApplicationHost applicationHost,
+            IApplicationPaths applicationPaths,
+            ILogger logger)
         {
             this.applicationHost = applicationHost;
+            this.applicationPaths = applicationPaths;
             this.logger = logger;
         }
 
@@ -57,11 +63,9 @@ namespace ETKMediaInfoBridge
             progress.Report(0);
             var currentAssembly = typeof(Plugin).GetTypeInfo().Assembly;
             var currentVersion = currentAssembly.GetName().Version;
-            var assemblyPath = currentAssembly.Location;
-            if (string.IsNullOrWhiteSpace(assemblyPath))
-            {
-                throw new InvalidOperationException("无法确定当前插件 DLL 路径。");
-            }
+            var assemblyPath = ResolveAssemblyPath(
+                this.applicationPaths.PluginsPath,
+                currentAssembly.GetName());
 
             var updatePath = assemblyPath + ".update";
             var backupPath = assemblyPath + ".bak";
@@ -177,6 +181,68 @@ namespace ETKMediaInfoBridge
                 File.Copy(assemblyPath, backupPath, true);
                 File.Copy(updatePath, assemblyPath, true);
             }
+        }
+
+        internal static string ResolveAssemblyPath(string pluginsPath, AssemblyName currentAssembly)
+        {
+            if (string.IsNullOrWhiteSpace(pluginsPath) || !Directory.Exists(pluginsPath))
+            {
+                throw new DirectoryNotFoundException("Emby 插件目录不存在: " + pluginsPath);
+            }
+
+            var fileName = currentAssembly.Name + ".dll";
+            var directPath = Path.Combine(pluginsPath, fileName);
+            if (File.Exists(directPath))
+            {
+                return directPath;
+            }
+
+            string matchingVersionPath = null;
+            string latestVersionPath = null;
+            Version latestVersion = null;
+            foreach (var candidate in Directory.GetFiles(
+                pluginsPath,
+                fileName,
+                SearchOption.AllDirectories))
+            {
+                try
+                {
+                    var candidateAssembly = AssemblyName.GetAssemblyName(candidate);
+                    if (!string.Equals(
+                        candidateAssembly.Name,
+                        currentAssembly.Name,
+                        StringComparison.Ordinal))
+                    {
+                        continue;
+                    }
+
+                    if (candidateAssembly.Version == currentAssembly.Version)
+                    {
+                        matchingVersionPath = candidate;
+                        break;
+                    }
+
+                    if (latestVersion == null || candidateAssembly.Version > latestVersion)
+                    {
+                        latestVersion = candidateAssembly.Version;
+                        latestVersionPath = candidate;
+                    }
+                }
+                catch (BadImageFormatException)
+                {
+                    // Ignore unrelated or incomplete files with the same name.
+                }
+            }
+
+            var resolvedPath = matchingVersionPath ?? latestVersionPath;
+            if (!string.IsNullOrWhiteSpace(resolvedPath))
+            {
+                return resolvedPath;
+            }
+
+            throw new FileNotFoundException(
+                "Emby 插件目录中未找到 " + fileName,
+                directPath);
         }
 
         private static void DeleteIfExists(string path)
