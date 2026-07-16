@@ -391,9 +391,13 @@ namespace ETKMediaInfoBridge
                 OfficialRating = payload.official_rating,
                 CommunityRating = payload.community_rating,
                 ProductionYear = payload.production_year,
-                IndexNumber = payload.episode_number ?? payload.season_number ?? info.IndexNumber,
-                ParentIndexNumber = payload.episode_number.HasValue
-                    ? payload.season_number
+                IndexNumber = string.Equals(this.ItemType, "Episode", StringComparison.Ordinal)
+                    ? payload.episode_number ?? info.IndexNumber
+                    : string.Equals(this.ItemType, "Season", StringComparison.Ordinal)
+                        ? payload.season_number ?? info.IndexNumber
+                        : info.IndexNumber,
+                ParentIndexNumber = string.Equals(this.ItemType, "Episode", StringComparison.Ordinal)
+                    ? payload.season_number ?? info.ParentIndexNumber
                     : info.ParentIndexNumber
             };
             if (DateTimeOffset.TryParse(payload.premiere_date, out var premiereDate))
