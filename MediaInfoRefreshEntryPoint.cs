@@ -7,6 +7,9 @@ using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Persistence;
 using MediaBrowser.Controller.Plugins;
+using MediaBrowser.Controller.Providers;
+using MediaBrowser.Model.Entities;
+using MediaBrowser.Model.IO;
 using MediaBrowser.Model.Logging;
 using MediaBrowser.Model.Serialization;
 using MediaBrowser.Model.Tasks;
@@ -45,6 +48,8 @@ namespace ETKMediaInfoBridge
         private readonly IItemRepository itemRepository;
         private readonly IJsonSerializer jsonSerializer;
         private readonly ITaskManager taskManager;
+        private readonly IProviderManager providerManager;
+        private readonly IDirectoryService directoryService;
         private readonly ILogger logger;
         private readonly ConcurrentDictionary<long, CancellationTokenSource> pending =
             new ConcurrentDictionary<long, CancellationTokenSource>();
@@ -55,12 +60,16 @@ namespace ETKMediaInfoBridge
             IItemRepository itemRepository,
             IJsonSerializer jsonSerializer,
             ITaskManager taskManager,
+            IProviderManager providerManager,
+            IFileSystem fileSystem,
             ILogger logger)
         {
             this.libraryManager = libraryManager;
             this.itemRepository = itemRepository;
             this.jsonSerializer = jsonSerializer;
             this.taskManager = taskManager;
+            this.providerManager = providerManager;
+            this.directoryService = new DirectoryService(fileSystem);
             this.logger = logger;
         }
 
@@ -157,6 +166,7 @@ namespace ETKMediaInfoBridge
             if (string.Equals(itemType, "Series", StringComparison.Ordinal)
                 || string.Equals(itemType, "Season", StringComparison.Ordinal))
             {
+                this.ScheduleRestore(item, imagesOnly: true);
                 foreach (var episode in this.libraryManager.GetItemList(new InternalItemsQuery
                 {
                     Parent = item,
@@ -182,7 +192,10 @@ namespace ETKMediaInfoBridge
             this.ScheduleRestore(item, dropConflictingExternalStreams: true);
         }
 
-        private void ScheduleRestore(BaseItem item, bool dropConflictingExternalStreams = false)
+        private void ScheduleRestore(
+            BaseItem item,
+            bool dropConflictingExternalStreams = false,
+            bool imagesOnly = false)
         {
             if (item == null || MediaInfoRefreshGuard.IsSuppressed(item.InternalId))
             {
@@ -226,14 +239,16 @@ namespace ETKMediaInfoBridge
                 item.InternalId,
                 mediaInfoUrl,
                 cancellation,
-                dropConflictingExternalStreams);
+                dropConflictingExternalStreams,
+                imagesOnly);
         }
 
         private async Task RestoreAfterRefreshAsync(
             long itemId,
             string mediaInfoUrl,
             CancellationTokenSource cancellation,
-            bool dropConflictingExternalStreams)
+            bool dropConflictingExternalStreams,
+            bool imagesOnly)
         {
             var slotAcquired = false;
             try
@@ -241,33 +256,37 @@ namespace ETKMediaInfoBridge
                 await Task.Delay(TimeSpan.FromSeconds(3), cancellation.Token).ConfigureAwait(false);
                 await RestoreSlots.WaitAsync(cancellation.Token).ConfigureAwait(false);
                 slotAcquired = true;
-                using (var response = await HttpClient.GetAsync(mediaInfoUrl, cancellation.Token).ConfigureAwait(false))
+                if (!imagesOnly)
                 {
-                    if (!response.IsSuccessStatusCode)
+                    using (var response = await HttpClient.GetAsync(mediaInfoUrl, cancellation.Token).ConfigureAwait(false))
                     {
-                        this.logger.Debug(
-                            "ETK MediaInfo cache request skipped for Item {0}: HTTP {1}",
-                            itemId,
-                            (int)response.StatusCode);
-                        return;
-                    }
+                        if (!response.IsSuccessStatusCode)
+                        {
+                            this.logger.Debug(
+                                "ETK MediaInfo cache request skipped for Item {0}: HTTP {1}",
+                                itemId,
+                                (int)response.StatusCode);
+                            return;
+                        }
 
-                    var json = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
-                    var payload = this.jsonSerializer.DeserializeFromString<ApplyEtkMediaInfo>(json);
-                    var result = MediaInfoImporter.Apply(
-                        this.libraryManager,
-                        this.itemRepository,
-                        itemId,
-                        payload?.MediaSourceInfo,
-                        payload?.Chapters,
-                        IntroChapterSnapshotStore.Get(itemId),
-                        dropConflictingExternalStreams);
-                    this.logger.Info(
-                        "ETK MediaInfo restored after refresh for Item {0}: {1} streams.",
-                        itemId,
-                        result.StreamCount);
-                    await this.NotifyItemReadyAsync(mediaInfoUrl, itemId).ConfigureAwait(false);
+                        var json = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                        var payload = this.jsonSerializer.DeserializeFromString<ApplyEtkMediaInfo>(json);
+                        var result = MediaInfoImporter.Apply(
+                            this.libraryManager,
+                            this.itemRepository,
+                            itemId,
+                            payload?.MediaSourceInfo,
+                            payload?.Chapters,
+                            IntroChapterSnapshotStore.Get(itemId),
+                            dropConflictingExternalStreams);
+                        this.logger.Info(
+                            "ETK MediaInfo restored after refresh for Item {0}: {1} streams.",
+                            itemId,
+                            result.StreamCount);
+                        await this.NotifyItemReadyAsync(mediaInfoUrl, itemId).ConfigureAwait(false);
+                    }
                 }
+                await this.RestoreMissingImagesAsync(itemId, CancellationToken.None).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
@@ -289,6 +308,102 @@ namespace ETKMediaInfoBridge
                     this.pending.TryRemove(itemId, out _);
                 }
                 cancellation.Dispose();
+            }
+        }
+
+        private async Task RestoreMissingImagesAsync(long itemId, CancellationToken cancellationToken)
+        {
+            var item = this.libraryManager.GetItemById(itemId);
+            if (item == null)
+            {
+                return;
+            }
+
+            var itemType = item.GetType().Name;
+            if (!string.Equals(itemType, "Movie", StringComparison.Ordinal)
+                && !string.Equals(itemType, "Series", StringComparison.Ordinal)
+                && !string.Equals(itemType, "Season", StringComparison.Ordinal)
+                && !string.Equals(itemType, "Episode", StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            var payload = await EtkMetadataClient.GetAsync(
+                this.jsonSerializer,
+                item.Path,
+                itemType,
+                string.Equals(itemType, "Season", StringComparison.Ordinal)
+                    ? EtkMetadataClient.ResolveSeasonNumber(item.Path, item.IndexNumber)
+                    : item.ParentIndexNumber,
+                string.Equals(itemType, "Episode", StringComparison.Ordinal) ? item.IndexNumber : null,
+                cancellationToken).ConfigureAwait(false);
+            if (payload?.images == null)
+            {
+                return;
+            }
+
+            var libraryOptions = this.libraryManager.GetLibraryOptions(item);
+            var restored = 0;
+            restored += await this.SaveMissingImageAsync(
+                item, libraryOptions, payload.images.primary, ImageType.Primary, cancellationToken).ConfigureAwait(false);
+            if (!string.Equals(itemType, "Season", StringComparison.Ordinal)
+                && !string.Equals(itemType, "Episode", StringComparison.Ordinal))
+            {
+                restored += await this.SaveMissingImageAsync(
+                    item, libraryOptions, payload.images.backdrop, ImageType.Backdrop, cancellationToken).ConfigureAwait(false);
+                restored += await this.SaveMissingImageAsync(
+                    item, libraryOptions, payload.images.logo, ImageType.Logo, cancellationToken).ConfigureAwait(false);
+                restored += await this.SaveMissingImageAsync(
+                    item, libraryOptions, payload.images.thumb, ImageType.Thumb, cancellationToken).ConfigureAwait(false);
+            }
+            else if (string.Equals(itemType, "Episode", StringComparison.Ordinal))
+            {
+                restored += await this.SaveMissingImageAsync(
+                    item, libraryOptions, payload.images.thumb, ImageType.Thumb, cancellationToken).ConfigureAwait(false);
+            }
+
+            if (restored > 0)
+            {
+                this.logger.Info(
+                    "ETK Images restored {0} missing images after refresh for Item {1}.",
+                    restored,
+                    itemId);
+            }
+        }
+
+        private async Task<int> SaveMissingImageAsync(
+            BaseItem item,
+            MediaBrowser.Model.Configuration.LibraryOptions libraryOptions,
+            string url,
+            ImageType imageType,
+            CancellationToken cancellationToken)
+        {
+            if (string.IsNullOrWhiteSpace(url) || item.HasImage(imageType, 0))
+            {
+                return 0;
+            }
+
+            try
+            {
+                await this.providerManager.SaveImage(
+                    item,
+                    libraryOptions,
+                    url,
+                    imageType,
+                    null,
+                    Array.Empty<long>(),
+                    this.directoryService,
+                    true,
+                    cancellationToken).ConfigureAwait(false);
+                item.UpdateToRepository(ItemUpdateType.ImageUpdate);
+                return 1;
+            }
+            catch (Exception ex)
+            {
+                this.logger.ErrorException(
+                    "ETK Images failed to restore " + imageType + " for Item " + item.InternalId,
+                    ex);
+                return 0;
             }
         }
 

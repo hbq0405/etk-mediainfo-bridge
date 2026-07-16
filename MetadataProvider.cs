@@ -101,10 +101,51 @@ namespace ETKMediaInfoBridge
                 var payload = serializer.DeserializeFromString<EtkMetadataPayload>(json);
                 if (payload != null)
                 {
+                    RewriteImageUrls(mediaInfoUrl, payload);
                     Cache[url] = Tuple.Create(DateTime.UtcNow, payload);
                 }
                 return payload;
             }
+        }
+
+        private static void RewriteImageUrls(string mediaInfoUrl, EtkMetadataPayload payload)
+        {
+            if (!Uri.TryCreate(mediaInfoUrl, UriKind.Absolute, out var mediaInfoUri))
+            {
+                return;
+            }
+
+            if (payload.images != null)
+            {
+                payload.images.primary = BuildImageProxyUrl(mediaInfoUri, payload.images.primary);
+                payload.images.backdrop = BuildImageProxyUrl(mediaInfoUri, payload.images.backdrop);
+                payload.images.logo = BuildImageProxyUrl(mediaInfoUri, payload.images.logo);
+                payload.images.thumb = BuildImageProxyUrl(mediaInfoUri, payload.images.thumb);
+            }
+
+            foreach (var person in payload.people ?? Array.Empty<EtkMetadataPerson>())
+            {
+                person.image_url = BuildImageProxyUrl(mediaInfoUri, person.image_url);
+            }
+        }
+
+        private static string BuildImageProxyUrl(Uri mediaInfoUri, string imageUrl)
+        {
+            if (string.IsNullOrWhiteSpace(imageUrl)
+                || !Uri.TryCreate(imageUrl, UriKind.Absolute, out var imageUri)
+                || (imageUri.Scheme != Uri.UriSchemeHttp && imageUri.Scheme != Uri.UriSchemeHttps))
+            {
+                return imageUrl;
+            }
+
+            var etkOrigin = mediaInfoUri.GetLeftPart(UriPartial.Authority);
+            if (string.Equals(imageUri.GetLeftPart(UriPartial.Authority), etkOrigin, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(imageUri.AbsolutePath, "/api/image_proxy", StringComparison.OrdinalIgnoreCase))
+            {
+                return imageUrl;
+            }
+
+            return etkOrigin + "/api/image_proxy?url=" + Uri.EscapeDataString(imageUrl);
         }
 
         public static string ResolveMediaInfoUrl(string itemPath)
