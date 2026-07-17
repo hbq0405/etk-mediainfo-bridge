@@ -57,6 +57,7 @@ namespace ETKMediaInfoBridge
 
         public void Run()
         {
+            Plugin.EnsureDependenciesLoaded();
             ManualImageEditInterceptor.Install(this.logger);
             this.DiscoverWebhookUrl();
             this.libraryManager.ItemAdded += this.OnItemAdded;

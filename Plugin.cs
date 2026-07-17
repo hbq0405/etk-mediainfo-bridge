@@ -61,9 +61,30 @@ namespace ETKMediaInfoBridge
                         }
                         offset += read;
                     }
-                    harmonyAssembly = Assembly.Load(bytes);
+                    harmonyAssembly = LoadIntoDefaultContext(bytes);
                 }
             }
+        }
+
+        private static Assembly LoadIntoDefaultContext(byte[] bytes)
+        {
+            var loadContextType = Type.GetType(
+                "System.Runtime.Loader.AssemblyLoadContext, System.Runtime.Loader",
+                false);
+            var defaultContext = loadContextType?
+                .GetProperty("Default", BindingFlags.Public | BindingFlags.Static)?
+                .GetValue(null);
+            var loadFromStream = loadContextType?.GetMethod(
+                "LoadFromStream",
+                new[] { typeof(Stream) });
+            if (defaultContext != null && loadFromStream != null)
+            {
+                using (var stream = new MemoryStream(bytes, false))
+                {
+                    return (Assembly)loadFromStream.Invoke(defaultContext, new object[] { stream });
+                }
+            }
+            return Assembly.Load(bytes);
         }
     }
 }
