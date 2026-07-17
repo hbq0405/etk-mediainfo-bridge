@@ -1,9 +1,12 @@
 using System;
 using System.Collections.Concurrent;
+using System.Linq;
 using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
+using MediaBrowser.Controller.Collections;
 using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.Entities.Movies;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Persistence;
 using MediaBrowser.Controller.Plugins;
@@ -41,6 +44,102 @@ namespace ETKMediaInfoBridge
         }
     }
 
+    internal static class EtkCollectionRestorer
+    {
+        private static readonly SemaphoreSlim Slot = new SemaphoreSlim(1, 1);
+
+        public static async Task RestoreAsync(
+            ILibraryManager libraryManager,
+            ICollectionManager collectionManager,
+            IJsonSerializer jsonSerializer,
+            ILogger logger,
+            long itemId,
+            EtkMetadataCollection[] knownCollections = null)
+        {
+            var movie = libraryManager.GetItemById(itemId) as Movie;
+            if (movie == null)
+            {
+                return;
+            }
+            var libraryOptions = libraryManager.GetLibraryOptions(movie);
+            if (libraryOptions == null || !libraryOptions.ImportCollections)
+            {
+                return;
+            }
+
+            var collections = knownCollections;
+            if (collections == null)
+            {
+                var payload = await EtkMetadataClient.GetAsync(
+                    jsonSerializer,
+                    movie.Path,
+                    "Movie",
+                    null,
+                    null,
+                    CancellationToken.None).ConfigureAwait(false);
+                collections = payload?.collections;
+            }
+            if (collections == null || collections.Length == 0)
+            {
+                return;
+            }
+
+            await Slot.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+            try
+            {
+                foreach (var collection in collections)
+                {
+                    if (string.IsNullOrWhiteSpace(collection.name)
+                        || string.IsNullOrWhiteSpace(collection.tmdb_id))
+                    {
+                        continue;
+                    }
+                    var boxSet = libraryManager.GetItemList(new InternalItemsQuery
+                    {
+                        Recursive = true,
+                        IncludeItemTypes = new[] { "BoxSet" }
+                    }).OfType<BoxSet>().FirstOrDefault(item =>
+                        item.ProviderIds.TryGetValue("Tmdb", out var tmdbId)
+                        && string.Equals(tmdbId, collection.tmdb_id, StringComparison.Ordinal));
+                    if (boxSet == null)
+                    {
+                        boxSet = await collectionManager.CreateCollection(
+                            new CollectionCreationOptions
+                            {
+                                Name = collection.name,
+                                ProviderIds = new ProviderIdDictionary
+                                {
+                                    ["Tmdb"] = collection.tmdb_id
+                                },
+                                ItemIdList = new[] { movie.InternalId }
+                            }).ConfigureAwait(false);
+                        logger.Info(
+                            "ETK Collections created {0} (Tmdb={1}) for Item {2}.",
+                            collection.name,
+                            collection.tmdb_id,
+                            movie.InternalId);
+                    }
+                    else if (movie.CollectionFolders == null
+                        || !movie.CollectionFolders.Any(item => item.InternalId == boxSet.InternalId))
+                    {
+                        await collectionManager.AddToCollection(
+                            boxSet.InternalId,
+                            new[] { movie.InternalId }).ConfigureAwait(false);
+                        logger.Info(
+                            "ETK Collections added Item {0} to {1} (Tmdb={2}).",
+                            movie.InternalId,
+                            boxSet.Name,
+                            collection.tmdb_id);
+                    }
+                }
+            }
+            finally
+            {
+                Slot.Release();
+            }
+        }
+    }
+
     public sealed class MediaInfoRefreshEntryPoint : IServerEntryPoint, IDisposable
     {
         private static readonly HttpClient HttpClient = new HttpClient
@@ -50,6 +149,7 @@ namespace ETKMediaInfoBridge
         private static readonly SemaphoreSlim RestoreSlots = new SemaphoreSlim(4, 4);
 
         private readonly ILibraryManager libraryManager;
+        private readonly ICollectionManager collectionManager;
         private readonly IItemRepository itemRepository;
         private readonly IJsonSerializer jsonSerializer;
         private readonly ITaskManager taskManager;
@@ -62,6 +162,7 @@ namespace ETKMediaInfoBridge
 
         public MediaInfoRefreshEntryPoint(
             ILibraryManager libraryManager,
+            ICollectionManager collectionManager,
             IItemRepository itemRepository,
             IJsonSerializer jsonSerializer,
             ITaskManager taskManager,
@@ -70,6 +171,7 @@ namespace ETKMediaInfoBridge
             ILogger logger)
         {
             this.libraryManager = libraryManager;
+            this.collectionManager = collectionManager;
             this.itemRepository = itemRepository;
             this.jsonSerializer = jsonSerializer;
             this.taskManager = taskManager;
@@ -82,6 +184,7 @@ namespace ETKMediaInfoBridge
         {
             Plugin.EnsureDependenciesLoaded();
             DeepDeleteInterceptor.Install(this.libraryManager, this.jsonSerializer, this.logger);
+            RefreshItemInterceptor.Install(this.OnRefreshRequested, this.logger);
             this.libraryManager.ItemAdded += this.OnItemAdded;
             this.libraryManager.ItemUpdated += this.OnItemUpdated;
             this.taskManager.TaskCompleted += this.OnTaskCompleted;
@@ -169,6 +272,24 @@ namespace ETKMediaInfoBridge
                 return;
             }
 
+            this.ScheduleRestoreTree(item);
+        }
+
+        private void OnRefreshRequested(long itemId)
+        {
+            if (this.disposed)
+            {
+                return;
+            }
+            this.ScheduleRestoreTree(this.libraryManager.GetItemById(itemId));
+        }
+
+        private void ScheduleRestoreTree(BaseItem item)
+        {
+            if (item == null || MediaInfoRefreshGuard.IsSuppressed(item.InternalId))
+            {
+                return;
+            }
             var itemType = item.GetType().Name;
             if (string.Equals(itemType, "Series", StringComparison.Ordinal)
                 || string.Equals(itemType, "Season", StringComparison.Ordinal))
@@ -294,6 +415,12 @@ namespace ETKMediaInfoBridge
                     }
                 }
                 await this.RestoreMissingImagesAsync(itemId, CancellationToken.None).ConfigureAwait(false);
+                await EtkCollectionRestorer.RestoreAsync(
+                    this.libraryManager,
+                    this.collectionManager,
+                    this.jsonSerializer,
+                    this.logger,
+                    itemId).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
@@ -456,6 +583,7 @@ namespace ETKMediaInfoBridge
                 return;
             }
             this.disposed = true;
+            RefreshItemInterceptor.Uninstall();
             DeepDeleteInterceptor.Uninstall();
             this.libraryManager.ItemAdded -= this.OnItemAdded;
             this.libraryManager.ItemUpdated -= this.OnItemUpdated;
