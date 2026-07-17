@@ -71,16 +71,77 @@ namespace ETKMediaInfoBridge
         public EtkMetadataImages images { get; set; }
     }
 
+    internal sealed class EtkRemoteImageCandidate
+    {
+        public string type { get; set; }
+        public string url { get; set; }
+        public string thumbnail_url { get; set; }
+        public string language { get; set; }
+        public int? width { get; set; }
+        public int? height { get; set; }
+        public double? community_rating { get; set; }
+        public int? vote_count { get; set; }
+    }
+
+    internal sealed class EtkRemoteImageSearchResponse
+    {
+        public EtkRemoteImageCandidate[] images { get; set; }
+    }
+
     internal static class EtkMetadataClient
     {
         private static readonly HttpClient HttpClient = new HttpClient
         {
             Timeout = TimeSpan.FromSeconds(15)
         };
+        private static readonly HttpClient ImageRefreshHttpClient = new HttpClient
+        {
+            Timeout = TimeSpan.FromMinutes(2)
+        };
         private static readonly ConcurrentDictionary<string, Tuple<DateTime, EtkMetadataPayload>> Cache =
             new ConcurrentDictionary<string, Tuple<DateTime, EtkMetadataPayload>>();
         private static readonly object OriginLock = new object();
         private static string etkOrigin;
+
+        public static bool ConfigureEtkOrigin(string url, string configurationDirectory)
+        {
+            if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)
+                || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
+            {
+                return false;
+            }
+            var origin = uri.GetLeftPart(UriPartial.Authority).TrimEnd('/');
+            lock (OriginLock)
+            {
+                etkOrigin = origin;
+                if (!string.IsNullOrWhiteSpace(configurationDirectory))
+                {
+                    Directory.CreateDirectory(configurationDirectory);
+                    File.WriteAllText(
+                        Path.Combine(configurationDirectory, "etk-mediainfo-bridge-origin.txt"),
+                        origin);
+                }
+            }
+            return true;
+        }
+
+        public static void LoadEtkOrigin(string configurationDirectory)
+        {
+            if (string.IsNullOrWhiteSpace(configurationDirectory))
+            {
+                return;
+            }
+            var path = Path.Combine(configurationDirectory, "etk-mediainfo-bridge-origin.txt");
+            if (File.Exists(path))
+            {
+                ConfigureEtkOrigin(File.ReadAllText(path).Trim(), null);
+            }
+        }
+
+        public static string GetEtkOrigin(ILibraryManager libraryManager)
+        {
+            return ResolveEtkOrigin(libraryManager);
+        }
 
         public static async Task<EtkMetadataPayload> GetAsync(
             IJsonSerializer serializer,
@@ -88,15 +149,30 @@ namespace ETKMediaInfoBridge
             string itemType,
             int? seasonNumber,
             int? episodeNumber,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            ILibraryManager libraryManager = null)
         {
             var mediaInfoUrl = ResolveMediaInfoUrl(itemPath);
-            if (string.IsNullOrEmpty(mediaInfoUrl))
+            string url;
+            if (!string.IsNullOrEmpty(mediaInfoUrl))
             {
-                return null;
+                RememberEtkOrigin(mediaInfoUrl);
+                url = BuildMetadataUrl(mediaInfoUrl, itemType, seasonNumber, episodeNumber);
             }
-            RememberEtkOrigin(mediaInfoUrl);
-            var url = BuildMetadataUrl(mediaInfoUrl, itemType, seasonNumber, episodeNumber);
+            else
+            {
+                var origin = ResolveEtkOrigin(libraryManager);
+                if (string.IsNullOrEmpty(origin))
+                {
+                    return null;
+                }
+                url = BuildPhysicalMetadataUrl(
+                    origin,
+                    itemPath,
+                    itemType,
+                    seasonNumber,
+                    episodeNumber);
+            }
             if (Cache.TryGetValue(url, out var cached)
                 && cached.Item1 > DateTime.UtcNow.AddSeconds(-1))
             {
@@ -112,7 +188,7 @@ namespace ETKMediaInfoBridge
                 var payload = serializer.DeserializeFromString<EtkMetadataPayload>(json);
                 if (payload != null)
                 {
-                    RewriteImageUrls(mediaInfoUrl, payload);
+                    RewriteImageUrls(url, payload);
                     Cache[url] = Tuple.Create(DateTime.UtcNow, payload);
                 }
                 return payload;
@@ -178,6 +254,85 @@ namespace ETKMediaInfoBridge
             }
         }
 
+        public static async Task<bool> RefreshImagesAsync(
+            string itemPath,
+            string itemType,
+            int? seasonNumber,
+            int? episodeNumber,
+            CancellationToken cancellationToken,
+            ILibraryManager libraryManager)
+        {
+            var origin = ResolveEtkOrigin(libraryManager);
+            if (string.IsNullOrEmpty(origin))
+            {
+                return false;
+            }
+            var url = BuildImageApiUrl(
+                origin,
+                "refresh",
+                itemPath,
+                itemType,
+                seasonNumber,
+                episodeNumber,
+                null);
+            using (var response = await ImageRefreshHttpClient.PostAsync(
+                url,
+                new StringContent(string.Empty),
+                cancellationToken).ConfigureAwait(false))
+            {
+                if (!response.IsSuccessStatusCode)
+                {
+                    return false;
+                }
+                Cache.Clear();
+                return true;
+            }
+        }
+
+        public static async Task<EtkRemoteImageCandidate[]> SearchImagesAsync(
+            IJsonSerializer serializer,
+            string itemPath,
+            string itemType,
+            int? seasonNumber,
+            int? episodeNumber,
+            string tmdbId,
+            bool includeAllLanguages,
+            CancellationToken cancellationToken,
+            ILibraryManager libraryManager)
+        {
+            var origin = ResolveEtkOrigin(libraryManager);
+            if (string.IsNullOrEmpty(origin))
+            {
+                return Array.Empty<EtkRemoteImageCandidate>();
+            }
+            var url = BuildImageApiUrl(
+                origin,
+                "search",
+                itemPath,
+                itemType,
+                seasonNumber,
+                episodeNumber,
+                tmdbId,
+                includeAllLanguages);
+            using (var response = await ImageRefreshHttpClient.GetAsync(url, cancellationToken).ConfigureAwait(false))
+            {
+                if (!response.IsSuccessStatusCode)
+                {
+                    return Array.Empty<EtkRemoteImageCandidate>();
+                }
+                var json = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                var payload = serializer.DeserializeFromString<EtkRemoteImageSearchResponse>(json);
+                var images = payload?.images ?? Array.Empty<EtkRemoteImageCandidate>();
+                var originUri = new Uri(origin, UriKind.Absolute);
+                foreach (var image in images)
+                {
+                    image.url = BuildImageProxyUrl(originUri, image.url);
+                    image.thumbnail_url = BuildImageProxyUrl(originUri, image.thumbnail_url);
+                }
+                return images;
+            }
+        }
+
         private static string ResolveEtkOrigin(ILibraryManager libraryManager)
         {
             lock (OriginLock)
@@ -186,6 +341,10 @@ namespace ETKMediaInfoBridge
                 {
                     return etkOrigin;
                 }
+            }
+            if (libraryManager == null)
+            {
+                return null;
             }
             foreach (var item in libraryManager.GetItemList(new InternalItemsQuery
             {
@@ -204,15 +363,7 @@ namespace ETKMediaInfoBridge
 
         private static bool RememberEtkOrigin(string url)
         {
-            if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
-            {
-                return false;
-            }
-            lock (OriginLock)
-            {
-                etkOrigin = uri.GetLeftPart(UriPartial.Authority).TrimEnd('/');
-            }
-            return true;
+            return ConfigureEtkOrigin(url, null);
         }
 
         private static void RewriteImageUrls(string mediaInfoUrl, EtkMetadataPayload payload)
@@ -344,6 +495,67 @@ namespace ETKMediaInfoBridge
             return mediaInfoUrl.TrimEnd('/') + "/metadata?" + string.Join("&", values);
         }
 
+        private static string BuildPhysicalMetadataUrl(
+            string origin,
+            string itemPath,
+            string itemType,
+            int? seasonNumber,
+            int? episodeNumber)
+        {
+            var values = new List<string>
+            {
+                "path=" + Uri.EscapeDataString(itemPath ?? string.Empty),
+                "item_type=" + Uri.EscapeDataString(itemType)
+            };
+            if (seasonNumber.HasValue)
+            {
+                values.Add("season_number=" + seasonNumber.Value);
+            }
+            if (episodeNumber.HasValue)
+            {
+                values.Add("episode_number=" + episodeNumber.Value);
+            }
+            return origin.TrimEnd('/') + "/api/emby/metadata?" + string.Join("&", values);
+        }
+
+        private static string BuildImageApiUrl(
+            string origin,
+            string action,
+            string itemPath,
+            string itemType,
+            int? seasonNumber,
+            int? episodeNumber,
+            string tmdbId,
+            bool? includeAllLanguages = null)
+        {
+            var values = new List<string>
+            {
+                "item_type=" + Uri.EscapeDataString(itemType ?? string.Empty)
+            };
+            if (!string.IsNullOrWhiteSpace(itemPath))
+            {
+                values.Add("path=" + Uri.EscapeDataString(itemPath));
+            }
+            if (seasonNumber.HasValue)
+            {
+                values.Add("season_number=" + seasonNumber.Value);
+            }
+            if (episodeNumber.HasValue)
+            {
+                values.Add("episode_number=" + episodeNumber.Value);
+            }
+            if (!string.IsNullOrWhiteSpace(tmdbId))
+            {
+                values.Add("tmdb_id=" + Uri.EscapeDataString(tmdbId));
+            }
+            if (includeAllLanguages.HasValue)
+            {
+                values.Add("include_all_languages=" + includeAllLanguages.Value.ToString().ToLowerInvariant());
+            }
+            return origin.TrimEnd('/') + "/api/emby/metadata/images/" + action
+                + "?" + string.Join("&", values);
+        }
+
         private static string FirstPathSegment(string value)
         {
             var end = value.IndexOfAny(new[] { '/', '?', '#' });
@@ -371,11 +583,16 @@ namespace ETKMediaInfoBridge
     {
         private readonly IJsonSerializer jsonSerializer;
         private readonly IHttpClient httpClient;
+        private readonly ILibraryManager libraryManager;
 
-        protected EtkMetadataProviderBase(IJsonSerializer jsonSerializer, IHttpClient httpClient)
+        protected EtkMetadataProviderBase(
+            IJsonSerializer jsonSerializer,
+            IHttpClient httpClient,
+            ILibraryManager libraryManager)
         {
             this.jsonSerializer = jsonSerializer;
             this.httpClient = httpClient;
+            this.libraryManager = libraryManager;
         }
 
         public string Name => "ETK Metadata";
@@ -394,7 +611,8 @@ namespace ETKMediaInfoBridge
                     ? EtkMetadataClient.ResolveSeasonNumber(info.Path, info.IndexNumber)
                     : info.ParentIndexNumber,
                 string.Equals(this.ItemType, "Episode", StringComparison.Ordinal) ? info.IndexNumber : null,
-                cancellationToken).ConfigureAwait(false);
+                cancellationToken,
+                this.libraryManager).ConfigureAwait(false);
             return BuildResult(info, payload);
         }
 
@@ -410,7 +628,8 @@ namespace ETKMediaInfoBridge
                     ? EtkMetadataClient.ResolveSeasonNumber(searchInfo.Path, searchInfo.IndexNumber)
                     : searchInfo.ParentIndexNumber,
                 string.Equals(this.ItemType, "Episode", StringComparison.Ordinal) ? searchInfo.IndexNumber : null,
-                cancellationToken).ConfigureAwait(false);
+                cancellationToken,
+                this.libraryManager).ConfigureAwait(false);
             if (payload == null)
             {
                 return Array.Empty<RemoteSearchResult>();
@@ -536,8 +755,11 @@ namespace ETKMediaInfoBridge
 
     public sealed class EtkMovieMetadataProvider : EtkMetadataProviderBase<Movie, MovieInfo>
     {
-        public EtkMovieMetadataProvider(IJsonSerializer serializer, IHttpClient httpClient)
-            : base(serializer, httpClient) { }
+        public EtkMovieMetadataProvider(
+            IJsonSerializer serializer,
+            IHttpClient httpClient,
+            ILibraryManager libraryManager)
+            : base(serializer, httpClient, libraryManager) { }
 
         protected override string ItemType => "Movie";
 
@@ -545,24 +767,33 @@ namespace ETKMediaInfoBridge
 
     public sealed class EtkSeriesMetadataProvider : EtkMetadataProviderBase<Series, SeriesInfo>
     {
-        public EtkSeriesMetadataProvider(IJsonSerializer serializer, IHttpClient httpClient)
-            : base(serializer, httpClient) { }
+        public EtkSeriesMetadataProvider(
+            IJsonSerializer serializer,
+            IHttpClient httpClient,
+            ILibraryManager libraryManager)
+            : base(serializer, httpClient, libraryManager) { }
 
         protected override string ItemType => "Series";
     }
 
     public sealed class EtkSeasonMetadataProvider : EtkMetadataProviderBase<Season, SeasonInfo>
     {
-        public EtkSeasonMetadataProvider(IJsonSerializer serializer, IHttpClient httpClient)
-            : base(serializer, httpClient) { }
+        public EtkSeasonMetadataProvider(
+            IJsonSerializer serializer,
+            IHttpClient httpClient,
+            ILibraryManager libraryManager)
+            : base(serializer, httpClient, libraryManager) { }
 
         protected override string ItemType => "Season";
     }
 
     public sealed class EtkEpisodeMetadataProvider : EtkMetadataProviderBase<Episode, EpisodeInfo>
     {
-        public EtkEpisodeMetadataProvider(IJsonSerializer serializer, IHttpClient httpClient)
-            : base(serializer, httpClient) { }
+        public EtkEpisodeMetadataProvider(
+            IJsonSerializer serializer,
+            IHttpClient httpClient,
+            ILibraryManager libraryManager)
+            : base(serializer, httpClient, libraryManager) { }
 
         protected override string ItemType => "Episode";
     }
@@ -742,13 +973,23 @@ namespace ETKMediaInfoBridge
             LibraryOptions libraryOptions,
             CancellationToken cancellationToken)
         {
+            if (ManualImageSearchInterceptor.TryGetRequest(
+                item.InternalId,
+                out var includeAllLanguages))
+            {
+                return await this.GetLiveImages(
+                    item,
+                    includeAllLanguages,
+                    cancellationToken).ConfigureAwait(false);
+            }
+
             if (item is BoxSet)
             {
-                item.ProviderIds.TryGetValue("Tmdb", out var tmdbId);
+                item.ProviderIds.TryGetValue("Tmdb", out var collectionTmdbId);
                 var collection = await EtkMetadataClient.GetCollectionAsync(
                     this.jsonSerializer,
                     this.libraryManager,
-                    tmdbId,
+                    collectionTmdbId,
                     cancellationToken).ConfigureAwait(false);
                 if (collection?.images == null)
                 {
@@ -759,6 +1000,7 @@ namespace ETKMediaInfoBridge
                 Add(collectionImages, collection.images.backdrop, ImageType.Backdrop);
                 return collectionImages;
             }
+
             var itemType = item is Movie ? "Movie"
                 : item is Series ? "Series"
                 : item is Season ? "Season"
@@ -771,21 +1013,72 @@ namespace ETKMediaInfoBridge
                     ? EtkMetadataClient.ResolveSeasonNumber(item.Path, item.IndexNumber)
                     : item.ParentIndexNumber,
                 item is Episode ? item.IndexNumber : null,
-                cancellationToken).ConfigureAwait(false);
+                cancellationToken,
+                this.libraryManager).ConfigureAwait(false);
             if (payload?.images == null)
             {
                 return Array.Empty<RemoteImageInfo>();
             }
-            var result = new List<RemoteImageInfo>();
-            Add(result, payload.images.primary, ImageType.Primary);
+            var cached = new List<RemoteImageInfo>();
+            Add(cached, payload.images.primary, ImageType.Primary);
             if (!(item is Season))
             {
                 if (!(item is Episode))
                 {
-                    Add(result, payload.images.backdrop, ImageType.Backdrop);
-                    Add(result, payload.images.logo, ImageType.Logo);
+                    Add(cached, payload.images.backdrop, ImageType.Backdrop);
+                    Add(cached, payload.images.logo, ImageType.Logo);
                 }
-                Add(result, payload.images.thumb, ImageType.Thumb);
+                Add(cached, payload.images.thumb, ImageType.Thumb);
+            }
+            return cached;
+        }
+
+        private async Task<IEnumerable<RemoteImageInfo>> GetLiveImages(
+            BaseItem item,
+            bool includeAllLanguages,
+            CancellationToken cancellationToken)
+        {
+            var itemType = item is Movie ? "Movie"
+                : item is Series ? "Series"
+                : item is Season ? "Season"
+                : item is Episode ? "Episode"
+                : "BoxSet";
+            item.ProviderIds.TryGetValue("Tmdb", out var tmdbId);
+            var candidates = await EtkMetadataClient.SearchImagesAsync(
+                this.jsonSerializer,
+                item.Path,
+                itemType,
+                item is Season
+                    ? EtkMetadataClient.ResolveSeasonNumber(item.Path, item.IndexNumber)
+                    : item.ParentIndexNumber,
+                item is Episode ? item.IndexNumber : null,
+                tmdbId,
+                includeAllLanguages,
+                cancellationToken,
+                this.libraryManager).ConfigureAwait(false);
+            var result = new List<RemoteImageInfo>();
+            foreach (var candidate in candidates)
+            {
+                if (!Enum.TryParse(candidate.type, true, out ImageType imageType)
+                    || string.IsNullOrWhiteSpace(candidate.url))
+                {
+                    continue;
+                }
+                result.Add(new RemoteImageInfo
+                {
+                    ProviderName = this.Name,
+                    Url = candidate.url,
+                    ThumbnailUrl = string.IsNullOrWhiteSpace(candidate.thumbnail_url)
+                        ? candidate.url
+                        : candidate.thumbnail_url,
+                    Type = imageType,
+                    Language = candidate.language,
+                    DisplayLanguage = candidate.language,
+                    Width = candidate.width,
+                    Height = candidate.height,
+                    CommunityRating = candidate.community_rating,
+                    VoteCount = candidate.vote_count
+                });
             }
             return result;
         }
@@ -800,18 +1093,19 @@ namespace ETKMediaInfoBridge
             });
         }
 
-        private void Add(List<RemoteImageInfo> images, string url, ImageType type)
+        private static void Add(List<RemoteImageInfo> images, string url, ImageType type)
         {
             if (!string.IsNullOrWhiteSpace(url))
             {
                 images.Add(new RemoteImageInfo
                 {
-                    ProviderName = this.Name,
+                    ProviderName = "ETK Images",
                     Url = url,
                     ThumbnailUrl = url,
                     Type = type
                 });
             }
         }
+
     }
 }

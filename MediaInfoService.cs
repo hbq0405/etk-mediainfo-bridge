@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Collections.Concurrent;
+using MediaBrowser.Common.Configuration;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Net;
 using MediaBrowser.Controller.Persistence;
@@ -78,15 +79,32 @@ namespace ETKMediaInfoBridge
         public int PreservedExternalStreamCount { get; set; }
     }
 
+    [Route("/ETKMediaInfo/Origin", "POST", Summary = "Configures the ETK server origin")]
+    [Authenticated(Roles = "Admin")]
+    public sealed class ConfigureEtkOrigin : IReturn<ConfigureEtkOriginResult>
+    {
+        public string Url { get; set; }
+    }
+
+    public sealed class ConfigureEtkOriginResult
+    {
+        public bool Configured { get; set; }
+    }
+
     public sealed class MediaInfoService : IService
     {
         private readonly ILibraryManager libraryManager;
         private readonly IItemRepository itemRepository;
+        private readonly IApplicationPaths applicationPaths;
 
-        public MediaInfoService(ILibraryManager libraryManager, IItemRepository itemRepository)
+        public MediaInfoService(
+            ILibraryManager libraryManager,
+            IItemRepository itemRepository,
+            IApplicationPaths applicationPaths)
         {
             this.libraryManager = libraryManager;
             this.itemRepository = itemRepository;
+            this.applicationPaths = applicationPaths;
         }
 
         public ApplyEtkMediaInfoResult Post(ApplyEtkMediaInfo request)
@@ -98,6 +116,16 @@ namespace ETKMediaInfoBridge
                 request.MediaSourceInfo,
                 request.Chapters,
                 dropConflictingExternalStreams: request.DropConflictingExternalStreams);
+        }
+
+        public ConfigureEtkOriginResult Post(ConfigureEtkOrigin request)
+        {
+            return new ConfigureEtkOriginResult
+            {
+                Configured = EtkMetadataClient.ConfigureEtkOrigin(
+                    request?.Url,
+                    this.applicationPaths.PluginConfigurationsPath)
+            };
         }
     }
 

@@ -64,6 +64,14 @@ namespace ETKMediaInfoBridge
                 IncludeItemTypes = new[] { "Movie", "Episode", "Video" }
             });
             var endpoints = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+            var configuredOrigin = EtkMetadataClient.GetEtkOrigin(this.libraryManager);
+            if (!string.IsNullOrEmpty(configuredOrigin))
+            {
+                endpoints[configuredOrigin] = new List<string>
+                {
+                    configuredOrigin.TrimEnd('/') + "/api/emby/metadata/backfill"
+                };
+            }
             var total = items.Length;
             for (var index = 0; index < total; index++)
             {

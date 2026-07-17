@@ -6,6 +6,7 @@ using System.Net.Http;
 using System.Reflection;
 using System.Text;
 using System.Threading.Tasks;
+using MediaBrowser.Common.Configuration;
 using MediaBrowser.Controller.Collections;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
@@ -26,6 +27,7 @@ namespace ETKMediaInfoBridge
         };
 
         private readonly ILibraryManager libraryManager;
+        private readonly IApplicationPaths applicationPaths;
         private readonly ISessionManager sessionManager;
         private readonly IUserDataManager userDataManager;
         private readonly IUserManager userManager;
@@ -39,6 +41,7 @@ namespace ETKMediaInfoBridge
 
         public EmbyEventRelay(
             ILibraryManager libraryManager,
+            IApplicationPaths applicationPaths,
             ISessionManager sessionManager,
             IUserDataManager userDataManager,
             IUserManager userManager,
@@ -47,6 +50,7 @@ namespace ETKMediaInfoBridge
             ILogger logger)
         {
             this.libraryManager = libraryManager;
+            this.applicationPaths = applicationPaths;
             this.sessionManager = sessionManager;
             this.userDataManager = userDataManager;
             this.userManager = userManager;
@@ -58,6 +62,7 @@ namespace ETKMediaInfoBridge
         public void Run()
         {
             Plugin.EnsureDependenciesLoaded();
+            EtkMetadataClient.LoadEtkOrigin(this.applicationPaths.PluginConfigurationsPath);
             ManualImageEditInterceptor.Install(this.logger);
             this.DiscoverWebhookUrl();
             this.libraryManager.ItemAdded += this.OnItemAdded;
@@ -75,6 +80,12 @@ namespace ETKMediaInfoBridge
 
         private void DiscoverWebhookUrl()
         {
+            var origin = EtkMetadataClient.GetEtkOrigin(this.libraryManager);
+            if (!string.IsNullOrEmpty(origin))
+            {
+                this.webhookUrl = origin.TrimEnd('/') + "/api/emby/events";
+                return;
+            }
             foreach (var item in this.libraryManager.GetItemList(new InternalItemsQuery
             {
                 Recursive = true,
@@ -95,12 +106,15 @@ namespace ETKMediaInfoBridge
                 return false;
             }
             var mediaInfoUrl = EtkMetadataClient.ResolveMediaInfoUrl(item.Path);
-            if (string.IsNullOrEmpty(mediaInfoUrl)
-                || !Uri.TryCreate(mediaInfoUrl, UriKind.Absolute, out var uri))
+            var origin = !string.IsNullOrEmpty(mediaInfoUrl)
+                && Uri.TryCreate(mediaInfoUrl, UriKind.Absolute, out var uri)
+                    ? uri.GetLeftPart(UriPartial.Authority).TrimEnd('/')
+                    : EtkMetadataClient.GetEtkOrigin(this.libraryManager);
+            if (string.IsNullOrEmpty(origin))
             {
                 return false;
             }
-            this.webhookUrl = uri.GetLeftPart(UriPartial.Authority).TrimEnd('/') + "/api/emby/events";
+            this.webhookUrl = origin + "/api/emby/events";
             return true;
         }
 

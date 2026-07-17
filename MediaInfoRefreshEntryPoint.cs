@@ -4,9 +4,11 @@ using System.Linq;
 using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
+using MediaBrowser.Common.Configuration;
 using MediaBrowser.Controller.Collections;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Movies;
+using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Persistence;
 using MediaBrowser.Controller.Plugins;
@@ -76,7 +78,8 @@ namespace ETKMediaInfoBridge
                     "Movie",
                     null,
                     null,
-                    CancellationToken.None).ConfigureAwait(false);
+                    CancellationToken.None,
+                    libraryManager).ConfigureAwait(false);
                 collections = payload?.collections;
             }
             if (collections == null || collections.Length == 0)
@@ -149,6 +152,7 @@ namespace ETKMediaInfoBridge
         private static readonly SemaphoreSlim RestoreSlots = new SemaphoreSlim(4, 4);
 
         private readonly ILibraryManager libraryManager;
+        private readonly IApplicationPaths applicationPaths;
         private readonly ICollectionManager collectionManager;
         private readonly IItemRepository itemRepository;
         private readonly IJsonSerializer jsonSerializer;
@@ -162,6 +166,7 @@ namespace ETKMediaInfoBridge
 
         public MediaInfoRefreshEntryPoint(
             ILibraryManager libraryManager,
+            IApplicationPaths applicationPaths,
             ICollectionManager collectionManager,
             IItemRepository itemRepository,
             IJsonSerializer jsonSerializer,
@@ -171,6 +176,7 @@ namespace ETKMediaInfoBridge
             ILogger logger)
         {
             this.libraryManager = libraryManager;
+            this.applicationPaths = applicationPaths;
             this.collectionManager = collectionManager;
             this.itemRepository = itemRepository;
             this.jsonSerializer = jsonSerializer;
@@ -183,8 +189,13 @@ namespace ETKMediaInfoBridge
         public void Run()
         {
             Plugin.EnsureDependenciesLoaded();
+            EtkMetadataClient.LoadEtkOrigin(this.applicationPaths.PluginConfigurationsPath);
             DeepDeleteInterceptor.Install(this.libraryManager, this.jsonSerializer, this.logger);
-            RefreshItemInterceptor.Install(this.OnRefreshRequested, this.logger);
+            ManualImageSearchInterceptor.Install(this.logger);
+            RefreshItemInterceptor.Install(
+                this.OnRefreshStarting,
+                this.OnRefreshRequested,
+                this.logger);
             this.libraryManager.ItemAdded += this.OnItemAdded;
             this.libraryManager.ItemUpdated += this.OnItemUpdated;
             this.taskManager.TaskCompleted += this.OnTaskCompleted;
@@ -284,6 +295,51 @@ namespace ETKMediaInfoBridge
             this.ScheduleRestoreTree(this.libraryManager.GetItemById(itemId));
         }
 
+        private void OnRefreshStarting(long itemId, bool replaceAllImages)
+        {
+            if (this.disposed || !replaceAllImages)
+            {
+                return;
+            }
+            var item = this.libraryManager.GetItemById(itemId);
+            if (item == null)
+            {
+                return;
+            }
+            var itemType = item is Movie ? "Movie"
+                : item is Series ? "Series"
+                : item is Season ? "Season"
+                : item is Episode ? "Episode"
+                : null;
+            if (itemType == null)
+            {
+                return;
+            }
+            var seasonNumber = item is Season
+                ? EtkMetadataClient.ResolveSeasonNumber(item.Path, item.IndexNumber)
+                : item.ParentIndexNumber;
+            var episodeNumber = item is Episode ? item.IndexNumber : null;
+            var refreshed = EtkMetadataClient.RefreshImagesAsync(
+                item.Path,
+                itemType,
+                seasonNumber,
+                episodeNumber,
+                CancellationToken.None,
+                this.libraryManager).GetAwaiter().GetResult();
+            if (refreshed)
+            {
+                this.logger.Info(
+                    "ETK Images refreshed the TMDb image snapshot before replacing images for Item {0}.",
+                    itemId);
+            }
+            else
+            {
+                this.logger.Warn(
+                    "ETK Images could not refresh the TMDb image snapshot before replacing images for Item {0}.",
+                    itemId);
+            }
+        }
+
         private void ScheduleRestoreTree(BaseItem item)
         {
             if (item == null || MediaInfoRefreshGuard.IsSuppressed(item.InternalId))
@@ -345,7 +401,14 @@ namespace ETKMediaInfoBridge
             }
             if (string.IsNullOrEmpty(mediaInfoUrl))
             {
-                return;
+                var itemType = item.GetType().Name;
+                if (!string.Equals(itemType, "Movie", StringComparison.Ordinal)
+                    && !string.Equals(itemType, "Series", StringComparison.Ordinal)
+                    && !string.Equals(itemType, "Season", StringComparison.Ordinal)
+                    && !string.Equals(itemType, "Episode", StringComparison.Ordinal))
+                {
+                    return;
+                }
             }
 
             var cancellation = new CancellationTokenSource();
@@ -384,7 +447,7 @@ namespace ETKMediaInfoBridge
                 await Task.Delay(TimeSpan.FromSeconds(3), cancellation.Token).ConfigureAwait(false);
                 await RestoreSlots.WaitAsync(cancellation.Token).ConfigureAwait(false);
                 slotAcquired = true;
-                if (!imagesOnly)
+                if (!imagesOnly && !string.IsNullOrEmpty(mediaInfoUrl))
                 {
                     using (var response = await HttpClient.GetAsync(mediaInfoUrl, cancellation.Token).ConfigureAwait(false))
                     {
@@ -470,7 +533,8 @@ namespace ETKMediaInfoBridge
                     ? EtkMetadataClient.ResolveSeasonNumber(item.Path, item.IndexNumber)
                     : item.ParentIndexNumber,
                 string.Equals(itemType, "Episode", StringComparison.Ordinal) ? item.IndexNumber : null,
-                cancellationToken).ConfigureAwait(false);
+                cancellationToken,
+                this.libraryManager).ConfigureAwait(false);
             if (payload?.images == null)
             {
                 return;
@@ -584,6 +648,7 @@ namespace ETKMediaInfoBridge
             }
             this.disposed = true;
             RefreshItemInterceptor.Uninstall();
+            ManualImageSearchInterceptor.Uninstall();
             DeepDeleteInterceptor.Uninstall();
             this.libraryManager.ItemAdded -= this.OnItemAdded;
             this.libraryManager.ItemUpdated -= this.OnItemUpdated;
