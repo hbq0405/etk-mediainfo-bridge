@@ -28,11 +28,16 @@ namespace ETKMediaInfoBridge
 
         public static bool IsSuppressed(long itemId)
         {
-            if (!SuppressedUntil.TryRemove(itemId, out var until))
+            if (!SuppressedUntil.TryGetValue(itemId, out var until))
             {
                 return false;
             }
-            return until > DateTime.UtcNow;
+            if (until > DateTime.UtcNow)
+            {
+                return true;
+            }
+            SuppressedUntil.TryRemove(itemId, out _);
+            return false;
         }
     }
 
@@ -75,6 +80,8 @@ namespace ETKMediaInfoBridge
 
         public void Run()
         {
+            Plugin.EnsureDependenciesLoaded();
+            DeepDeleteInterceptor.Install(this.libraryManager, this.jsonSerializer, this.logger);
             this.libraryManager.ItemAdded += this.OnItemAdded;
             this.libraryManager.ItemUpdated += this.OnItemUpdated;
             this.taskManager.TaskCompleted += this.OnTaskCompleted;
@@ -395,6 +402,7 @@ namespace ETKMediaInfoBridge
                     this.directoryService,
                     true,
                     cancellationToken).ConfigureAwait(false);
+                MediaInfoRefreshGuard.Suppress(item.InternalId);
                 item.UpdateToRepository(ItemUpdateType.ImageUpdate);
                 return 1;
             }
@@ -448,6 +456,7 @@ namespace ETKMediaInfoBridge
                 return;
             }
             this.disposed = true;
+            DeepDeleteInterceptor.Uninstall();
             this.libraryManager.ItemAdded -= this.OnItemAdded;
             this.libraryManager.ItemUpdated -= this.OnItemUpdated;
             this.taskManager.TaskCompleted -= this.OnTaskCompleted;

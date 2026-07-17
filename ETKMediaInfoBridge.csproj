@@ -3,15 +3,18 @@
     <TargetFramework>netstandard2.0</TargetFramework>
     <AssemblyName>ETKMediaInfoBridge</AssemblyName>
     <RootNamespace>ETKMediaInfoBridge</RootNamespace>
-    <Version>1.3.6</Version>
+    <Version>1.3.7</Version>
     <Nullable>disable</Nullable>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="MediaBrowser.Server.Core" Version="4.9.1.90" PrivateAssets="all" />
+    <PackageReference Include="Lib.Harmony" Version="2.3.6" PrivateAssets="all" GeneratePathProperty="true" />
+    <PackageReference Include="System.Memory" Version="4.6.0" PrivateAssets="all" />
   </ItemGroup>
 
   <ItemGroup>
     <EmbeddedResource Include="logo.png" LogicalName="ETKMediaInfoBridge.logo.png" />
+    <EmbeddedResource Include="$(PkgLib_Harmony)\lib\net8.0\0Harmony.dll" LogicalName="ETKMediaInfoBridge.0Harmony.dll" />
   </ItemGroup>
 </Project>
