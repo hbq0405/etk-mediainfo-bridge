@@ -8,10 +8,8 @@ namespace ETKMediaInfoBridge
 {
     public sealed class Plugin : BasePlugin, IHasThumbImage
     {
-        static Plugin()
-        {
-            AppDomain.CurrentDomain.AssemblyResolve += ResolveEmbeddedAssembly;
-        }
+        private static readonly object DependencyLock = new object();
+        private static Assembly harmonyAssembly;
 
         public override string Name => "ETK MediaInfo Bridge";
 
@@ -28,33 +26,43 @@ namespace ETKMediaInfoBridge
 
         internal static void EnsureDependenciesLoaded()
         {
-        }
-
-        private static Assembly ResolveEmbeddedAssembly(object sender, ResolveEventArgs args)
-        {
-            if (!string.Equals(new AssemblyName(args.Name).Name, "0Harmony", StringComparison.OrdinalIgnoreCase))
+            lock (DependencyLock)
             {
-                return null;
-            }
-            using (var stream = typeof(Plugin).GetTypeInfo().Assembly
-                .GetManifestResourceStream("ETKMediaInfoBridge.0Harmony.dll"))
-            {
-                if (stream == null)
+                if (harmonyAssembly != null)
                 {
-                    return null;
+                    return;
                 }
-                var bytes = new byte[stream.Length];
-                var offset = 0;
-                while (offset < bytes.Length)
+                foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
                 {
-                    var read = stream.Read(bytes, offset, bytes.Length - offset);
-                    if (read == 0)
+                    if (string.Equals(
+                        assembly.GetName().Name,
+                        "0Harmony",
+                        StringComparison.OrdinalIgnoreCase))
                     {
-                        break;
+                        harmonyAssembly = assembly;
+                        return;
                     }
-                    offset += read;
                 }
-                return Assembly.Load(bytes);
+                using (var stream = typeof(Plugin).GetTypeInfo().Assembly
+                    .GetManifestResourceStream("ETKMediaInfoBridge.0Harmony.dll"))
+                {
+                    if (stream == null)
+                    {
+                        throw new FileNotFoundException("Embedded 0Harmony dependency was not found.");
+                    }
+                    var bytes = new byte[stream.Length];
+                    var offset = 0;
+                    while (offset < bytes.Length)
+                    {
+                        var read = stream.Read(bytes, offset, bytes.Length - offset);
+                        if (read == 0)
+                        {
+                            break;
+                        }
+                        offset += read;
+                    }
+                    harmonyAssembly = Assembly.Load(bytes);
+                }
             }
         }
     }
