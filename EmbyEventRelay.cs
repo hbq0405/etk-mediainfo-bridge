@@ -137,9 +137,19 @@ namespace ETKMediaInfoBridge
             this.TrySetWebhookUrl(item);
             var reason = eventArgs.UpdateReason;
             if ((reason & ItemUpdateType.ImageUpdate) != 0
-                && ManualImageEditInterceptor.Consume(item.InternalId))
+                && ManualImageEditInterceptor.TryConsume(item.InternalId, out var imageEdit))
             {
-                this.QueueEvent("image.update", item);
+                var extra = new Dictionary<string, object>();
+                if (!string.IsNullOrWhiteSpace(imageEdit.ImageType)
+                    && !string.IsNullOrWhiteSpace(imageEdit.ImageUrl))
+                {
+                    extra["Image"] = new Dictionary<string, object>
+                    {
+                        ["Type"] = imageEdit.ImageType,
+                        ["Url"] = imageEdit.ImageUrl
+                    };
+                }
+                this.QueueEvent("image.update", item, extra: extra);
                 return;
             }
             if ((reason & ItemUpdateType.MetadataEdit) != 0)
@@ -338,6 +348,8 @@ namespace ETKMediaInfoBridge
             };
             AddReflectedValue(payload, item, "SeriesId");
             AddReflectedValue(payload, item, "SeriesName");
+            AddReflectedValue(payload, item, "IndexNumber");
+            AddReflectedValue(payload, item, "ParentIndexNumber");
             return payload;
         }
 

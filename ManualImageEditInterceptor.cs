@@ -11,9 +11,16 @@ namespace ETKMediaInfoBridge
 {
     internal static class ManualImageEditInterceptor
     {
+        internal sealed class ManualImageEdit
+        {
+            public DateTime ExpiresAt { get; set; }
+            public string ImageType { get; set; }
+            public string ImageUrl { get; set; }
+        }
+
         private const string HarmonyId = "ETKMediaInfoBridge.ManualImageEdit";
-        private static readonly ConcurrentDictionary<long, DateTime> MarkedUntil =
-            new ConcurrentDictionary<long, DateTime>();
+        private static readonly ConcurrentDictionary<long, ManualImageEdit> MarkedEdits =
+            new ConcurrentDictionary<long, ManualImageEdit>();
         private static readonly List<MethodInfo> PatchedMethods = new List<MethodInfo>();
         private static Harmony harmony;
         private static ILogger logger;
@@ -33,13 +40,13 @@ namespace ETKMediaInfoBridge
                 PatchedMethods.Count);
         }
 
-        public static bool Consume(long itemId)
+        public static bool TryConsume(long itemId, out ManualImageEdit edit)
         {
-            if (!MarkedUntil.TryRemove(itemId, out var until))
+            if (!MarkedEdits.TryRemove(itemId, out edit))
             {
                 return false;
             }
-            return until > DateTime.UtcNow;
+            return edit.ExpiresAt > DateTime.UtcNow;
         }
 
         public static void Uninstall()
@@ -53,7 +60,7 @@ namespace ETKMediaInfoBridge
                 harmony.Unpatch(method, HarmonyPatchType.All, HarmonyId);
             }
             PatchedMethods.Clear();
-            MarkedUntil.Clear();
+            MarkedEdits.Clear();
             harmony = null;
         }
 
@@ -120,7 +127,10 @@ namespace ETKMediaInfoBridge
 
         private static void BeforeImageRequest(object __0)
         {
-            Mark(RequestItemId(__0));
+            Mark(
+                RequestItemId(__0),
+                Convert.ToString(GetPropertyValue(__0, "Type")),
+                Convert.ToString(GetPropertyValue(__0, "ImageUrl")));
         }
 
         private static void BeforeRemoteImageRequest(object __instance, object __0)
@@ -132,7 +142,10 @@ namespace ETKMediaInfoBridge
             {
                 return;
             }
-            Mark(RequestItemId(__0));
+            Mark(
+                RequestItemId(__0),
+                Convert.ToString(GetPropertyValue(__0, "Type")),
+                Convert.ToString(GetPropertyValue(__0, "ImageUrl")));
         }
 
         private static long RequestItemId(object request)
@@ -160,11 +173,16 @@ namespace ETKMediaInfoBridge
             return null;
         }
 
-        private static void Mark(long itemId)
+        private static void Mark(long itemId, string imageType = null, string imageUrl = null)
         {
             if (itemId > 0)
             {
-                MarkedUntil[itemId] = DateTime.UtcNow.AddSeconds(10);
+                MarkedEdits[itemId] = new ManualImageEdit
+                {
+                    ExpiresAt = DateTime.UtcNow.AddSeconds(10),
+                    ImageType = imageType,
+                    ImageUrl = imageUrl
+                };
             }
         }
     }
