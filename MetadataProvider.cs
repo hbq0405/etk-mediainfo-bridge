@@ -42,6 +42,7 @@ namespace ETKMediaInfoBridge
     {
         public string name { get; set; }
         public string tmdb_id { get; set; }
+        public string[] member_tmdb_ids { get; set; }
     }
 
     internal sealed class EtkMetadataPayload
@@ -259,6 +260,7 @@ namespace ETKMediaInfoBridge
             string itemType,
             int? seasonNumber,
             int? episodeNumber,
+            string tmdbId,
             CancellationToken cancellationToken,
             ILibraryManager libraryManager)
         {
@@ -274,7 +276,7 @@ namespace ETKMediaInfoBridge
                 itemType,
                 seasonNumber,
                 episodeNumber,
-                null);
+                tmdbId);
             using (var response = await ImageRefreshHttpClient.PostAsync(
                 url,
                 new StringContent(string.Empty),
@@ -753,7 +755,8 @@ namespace ETKMediaInfoBridge
         }
     }
 
-    public sealed class EtkMovieMetadataProvider : EtkMetadataProviderBase<Movie, MovieInfo>
+    public sealed class EtkMovieMetadataProvider :
+        EtkMetadataProviderBase<Movie, MovieInfo>, IHasMetadataFeatures
     {
         public EtkMovieMetadataProvider(
             IJsonSerializer serializer,
@@ -762,6 +765,8 @@ namespace ETKMediaInfoBridge
             : base(serializer, httpClient, libraryManager) { }
 
         protected override string ItemType => "Movie";
+
+        public MetadataFeatures[] Features => new[] { MetadataFeatures.Collections };
 
     }
 
