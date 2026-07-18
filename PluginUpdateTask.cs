@@ -7,6 +7,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using MediaBrowser.Common;
 using MediaBrowser.Common.Configuration;
+using MediaBrowser.Controller.Library;
 using MediaBrowser.Model.Logging;
 using MediaBrowser.Model.Tasks;
 
@@ -14,21 +15,21 @@ namespace ETKMediaInfoBridge
 {
     public sealed class PluginUpdateTask : IScheduledTask, IConfigurableScheduledTask
     {
-        private const string LatestDownloadUrl =
-            "https://github.com/hbq0405/etk-mediainfo-bridge/releases/latest/download/ETKMediaInfoBridge.dll";
-
         private static readonly HttpClient HttpClient = CreateHttpClient();
         private readonly IApplicationHost applicationHost;
         private readonly IApplicationPaths applicationPaths;
+        private readonly ILibraryManager libraryManager;
         private readonly ILogger logger;
 
         public PluginUpdateTask(
             IApplicationHost applicationHost,
             IApplicationPaths applicationPaths,
+            ILibraryManager libraryManager,
             ILogger logger)
         {
             this.applicationHost = applicationHost;
             this.applicationPaths = applicationPaths;
+            this.libraryManager = libraryManager;
             this.logger = logger;
         }
 
@@ -36,7 +37,7 @@ namespace ETKMediaInfoBridge
 
         public string Key => "ETKMediaInfoBridgeUpdate";
 
-        public string Description => "从 GitHub Release 下载并安装最新版插件，更新完成后需重启 Emby。";
+        public string Description => "通过 ETK 代理下载并安装最新版插件，更新完成后需重启 Emby。";
 
         public string Category => "ETK MediaInfo Bridge";
 
@@ -76,9 +77,16 @@ namespace ETKMediaInfoBridge
                 this.logger.Info(
                     "Checking ETK MediaInfo Bridge update. Current version: {0}",
                     currentVersion);
+                EtkMetadataClient.LoadEtkOrigin(this.applicationPaths.PluginConfigurationsPath);
+                var etkOrigin = EtkMetadataClient.GetEtkOrigin(this.libraryManager);
+                if (string.IsNullOrWhiteSpace(etkOrigin))
+                {
+                    throw new InvalidOperationException("无法确定 ETK 服务地址，不能通过 ETK 代理更新插件。");
+                }
+                var updateUrl = etkOrigin.TrimEnd('/') + "/api/emby/plugin-update";
 
                 using (var response = await HttpClient.GetAsync(
-                    LatestDownloadUrl,
+                    updateUrl,
                     HttpCompletionOption.ResponseHeadersRead,
                     cancellationToken).ConfigureAwait(false))
                 {
