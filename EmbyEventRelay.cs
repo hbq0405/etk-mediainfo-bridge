@@ -64,6 +64,7 @@ namespace ETKMediaInfoBridge
             Plugin.EnsureDependenciesLoaded();
             EtkMetadataClient.LoadEtkOrigin(this.applicationPaths.PluginConfigurationsPath);
             ManualImageEditInterceptor.Install(this.logger);
+            ManualMetadataEditInterceptor.Install(this.logger);
             this.DiscoverWebhookUrl();
             this.libraryManager.ItemAdded += this.OnItemAdded;
             this.libraryManager.ItemUpdated += this.OnItemUpdated;
@@ -152,7 +153,8 @@ namespace ETKMediaInfoBridge
                 this.QueueEvent("image.update", item, extra: extra);
                 return;
             }
-            if ((reason & ItemUpdateType.MetadataEdit) != 0)
+            if ((reason & ItemUpdateType.MetadataEdit) != 0
+                && ManualMetadataEditInterceptor.Consume(item.InternalId))
             {
                 this.QueueEvent("metadata.update", item);
             }
@@ -402,6 +404,7 @@ namespace ETKMediaInfoBridge
             }
             this.disposed = true;
             ManualImageEditInterceptor.Uninstall();
+            ManualMetadataEditInterceptor.Uninstall();
             this.libraryManager.ItemAdded -= this.OnItemAdded;
             this.libraryManager.ItemUpdated -= this.OnItemUpdated;
             this.sessionManager.PlaybackStart -= this.OnPlaybackStart;
