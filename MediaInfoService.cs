@@ -17,6 +17,8 @@ namespace ETKMediaInfoBridge
     {
         private static readonly ConcurrentDictionary<long, List<ChapterInfo>> Snapshots =
             new ConcurrentDictionary<long, List<ChapterInfo>>();
+        private static readonly ConcurrentDictionary<long, List<ChapterInfo>> SyncedSnapshots =
+            new ConcurrentDictionary<long, List<ChapterInfo>>();
 
         public static readonly MarkerType[] MarkerTypes =
             { MarkerType.IntroStart, MarkerType.IntroEnd };
@@ -39,6 +41,35 @@ namespace ETKMediaInfoBridge
             }
             Snapshots[itemId] = introChapters;
             return true;
+        }
+
+        public static bool NeedsSync(long itemId, IEnumerable<ChapterInfo> chapters)
+        {
+            var introChapters = (chapters ?? Enumerable.Empty<ChapterInfo>())
+                .Where(IsIntroChapter)
+                .ToList();
+            if (!HasCompleteIntro(introChapters))
+            {
+                return false;
+            }
+            if (!SyncedSnapshots.TryGetValue(itemId, out var syncedChapters))
+            {
+                return true;
+            }
+            return MarkerTypes.Any(marker =>
+                introChapters.First(chapter => chapter.MarkerType == marker).StartPositionTicks
+                != syncedChapters.First(chapter => chapter.MarkerType == marker).StartPositionTicks);
+        }
+
+        public static void MarkSynced(long itemId, IEnumerable<ChapterInfo> chapters)
+        {
+            var introChapters = (chapters ?? Enumerable.Empty<ChapterInfo>())
+                .Where(IsIntroChapter)
+                .ToList();
+            if (HasCompleteIntro(introChapters))
+            {
+                SyncedSnapshots[itemId] = introChapters;
+            }
         }
 
         public static bool HasCompleteIntro(IEnumerable<ChapterInfo> chapters)

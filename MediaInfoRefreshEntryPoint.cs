@@ -285,18 +285,16 @@ namespace ETKMediaInfoBridge
                             {
                                 continue;
                             }
-                            using (var response = await HttpClient.PostAsync(
-                                BuildCallbackUrl(mediaInfoUrl, "intro-sync", episode.InternalId),
-                                new StringContent(string.Empty)).ConfigureAwait(false))
+                            if (await this.TryNotifyIntroAsync(
+                                episode.InternalId,
+                                mediaInfoUrl,
+                                chapters).ConfigureAwait(false))
                             {
-                                if (response.IsSuccessStatusCode)
-                                {
-                                    notified++;
-                                }
-                                else
-                                {
-                                    failed++;
-                                }
+                                notified++;
+                            }
+                            else
+                            {
+                                failed++;
                             }
                         }
                         catch (Exception ex)
@@ -497,6 +495,19 @@ namespace ETKMediaInfoBridge
                 await Task.Delay(TimeSpan.FromSeconds(3), cancellation.Token).ConfigureAwait(false);
                 await RestoreSlots.WaitAsync(cancellation.Token).ConfigureAwait(false);
                 slotAcquired = true;
+                var item = this.libraryManager.GetItemById(itemId);
+                if (item is Episode && !string.IsNullOrEmpty(mediaInfoUrl))
+                {
+                    var chapters = this.itemRepository.GetChapters(
+                        itemId,
+                        IntroChapterSnapshotStore.MarkerTypes,
+                        CancellationToken.None);
+                    IntroChapterSnapshotStore.Store(itemId, chapters);
+                    if (IntroChapterSnapshotStore.NeedsSync(itemId, chapters))
+                    {
+                        await this.TryNotifyIntroAsync(itemId, mediaInfoUrl, chapters).ConfigureAwait(false);
+                    }
+                }
                 if (!imagesOnly && !string.IsNullOrEmpty(mediaInfoUrl))
                 {
                     using (var response = await HttpClient.GetAsync(mediaInfoUrl, cancellation.Token).ConfigureAwait(false))
@@ -558,6 +569,46 @@ namespace ETKMediaInfoBridge
                     this.pending.TryRemove(itemId, out _);
                 }
                 cancellation.Dispose();
+            }
+        }
+
+        private async Task<bool> TryNotifyIntroAsync(
+            long itemId,
+            string mediaInfoUrl,
+            IEnumerable<ChapterInfo> chapters)
+        {
+            if (string.IsNullOrEmpty(mediaInfoUrl))
+            {
+                return false;
+            }
+            try
+            {
+                using (var response = await HttpClient.PostAsync(
+                    BuildCallbackUrl(mediaInfoUrl, "intro-sync", itemId),
+                    new StringContent(string.Empty)).ConfigureAwait(false))
+                {
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        this.logger.Debug(
+                            "ETK MediaInfo intro snapshot notify returned HTTP {0} for Item {1}.",
+                            (int)response.StatusCode,
+                            itemId);
+                        return false;
+                    }
+                }
+                IntroChapterSnapshotStore.MarkSynced(itemId, chapters);
+                this.logger.Info(
+                    "ETK MediaInfo notified ETK of an intro update for Item {0}.",
+                    itemId);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                this.logger.Debug(
+                    "ETK MediaInfo intro snapshot notify failed for Item {0}: {1}",
+                    itemId,
+                    ex.Message);
+                return false;
             }
         }
 
