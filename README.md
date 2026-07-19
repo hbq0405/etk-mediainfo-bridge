@@ -78,4 +78,11 @@ X-Emby-Token: <admin-api-key>
 dotnet build -c Release
 ```
 
+兼容 Emby 4.9.0.35 的发布构建需从该版本服务端 `/system` 目录提取
+`MediaBrowser.Common.dll`、`MediaBrowser.Controller.dll` 和 `MediaBrowser.Model.dll`，并执行：
+
+```bash
+dotnet build -c Release -p:EmbyReferencePath=/path/to/emby-4.9.0.35-sdk
+```
+
 构建产物位于 `bin/Release/netstandard2.0/ETKMediaInfoBridge.dll`。

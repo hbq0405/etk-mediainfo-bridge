@@ -4,6 +4,7 @@ using System.Linq;
 using System.Threading;
 using System.Collections.Concurrent;
 using MediaBrowser.Common.Configuration;
+using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Net;
 using MediaBrowser.Controller.Persistence;
@@ -13,6 +14,78 @@ using MediaBrowser.Model.Services;
 
 namespace ETKMediaInfoBridge
 {
+    internal static class EmbyRepositoryCompat
+    {
+        public static List<ChapterInfo> GetChapters(
+            IItemRepository repository,
+            BaseItem item,
+            MarkerType[] markerTypes = null)
+        {
+            if (markerTypes != null)
+            {
+                var modernMarkerMethod = typeof(IItemRepository).GetMethod(
+                    "GetChapters",
+                    new[] { typeof(long), typeof(MarkerType[]), typeof(CancellationToken) });
+                if (modernMarkerMethod != null)
+                {
+                    return ToList<ChapterInfo>(modernMarkerMethod.Invoke(
+                        repository,
+                        new object[] { item.InternalId, markerTypes, CancellationToken.None }));
+                }
+
+                var legacyMarkerMethod = typeof(IItemRepository).GetMethod(
+                    "GetChapters",
+                    new[] { typeof(long), typeof(MarkerType[]) });
+                if (legacyMarkerMethod != null)
+                {
+                    return ToList<ChapterInfo>(legacyMarkerMethod.Invoke(
+                        repository,
+                        new object[] { item.InternalId, markerTypes }));
+                }
+            }
+
+            var modernMethod = typeof(IItemRepository).GetMethod(
+                "GetChapters",
+                new[] { typeof(BaseItem), typeof(CancellationToken) });
+            if (modernMethod != null)
+            {
+                return ToList<ChapterInfo>(modernMethod.Invoke(
+                    repository,
+                    new object[] { item, CancellationToken.None }));
+            }
+
+            var legacyMethod = typeof(IItemRepository).GetMethod(
+                "GetChapters",
+                new[] { typeof(BaseItem) });
+            return ToList<ChapterInfo>(legacyMethod?.Invoke(repository, new object[] { item }));
+        }
+
+        public static List<MediaStream> GetMediaStreams(
+            IItemRepository repository,
+            MediaStreamQuery query)
+        {
+            var modernMethod = typeof(IItemRepository).GetMethod(
+                "GetMediaStreams",
+                new[] { typeof(MediaStreamQuery), typeof(CancellationToken) });
+            if (modernMethod != null)
+            {
+                return ToList<MediaStream>(modernMethod.Invoke(
+                    repository,
+                    new object[] { query, CancellationToken.None }));
+            }
+
+            var legacyMethod = typeof(IItemRepository).GetMethod(
+                "GetMediaStreams",
+                new[] { typeof(MediaStreamQuery) });
+            return ToList<MediaStream>(legacyMethod?.Invoke(repository, new object[] { query }));
+        }
+
+        private static List<T> ToList<T>(object value)
+        {
+            return value is IEnumerable<T> values ? values.ToList() : new List<T>();
+        }
+    }
+
     internal static class IntroChapterSnapshotStore
     {
         private static readonly ConcurrentDictionary<long, List<ChapterInfo>> Snapshots =
@@ -184,9 +257,9 @@ namespace ETKMediaInfoBridge
 
             MediaInfoRefreshGuard.Suppress(item.InternalId);
             var streams = source.MediaStreams.ToList();
-            var externalStreams = itemRepository.GetMediaStreams(
-                    new MediaStreamQuery { ItemId = item.InternalId },
-                    CancellationToken.None)
+            var externalStreams = EmbyRepositoryCompat.GetMediaStreams(
+                    itemRepository,
+                    new MediaStreamQuery { ItemId = item.InternalId })
                 .Where(stream => stream.IsExternal)
                 .ToList();
             var usedIndexes = new HashSet<int>(streams.Select(stream => stream.Index));
@@ -221,8 +294,7 @@ namespace ETKMediaInfoBridge
                 CancellationToken.None);
             itemRepository.SaveMediaStreams(item.InternalId, streams, CancellationToken.None);
 
-            var existingChapters = itemRepository.GetChapters(item, CancellationToken.None)
-                ?? new List<ChapterInfo>();
+            var existingChapters = EmbyRepositoryCompat.GetChapters(itemRepository, item);
             var incomingChapters = (chapters ?? new List<ChapterInfo>())
                 .Where(chapter => !IntroChapterSnapshotStore.IsIntroChapter(chapter))
                 .ToList();

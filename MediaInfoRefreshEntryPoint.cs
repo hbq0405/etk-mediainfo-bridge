@@ -286,10 +286,10 @@ namespace ETKMediaInfoBridge
                 var failed = 0;
                 foreach (var episode in episodes)
                 {
-                    var chapters = this.itemRepository.GetChapters(
-                        episode.InternalId,
-                        IntroChapterSnapshotStore.MarkerTypes,
-                        CancellationToken.None);
+                    var chapters = EmbyRepositoryCompat.GetChapters(
+                        this.itemRepository,
+                        episode,
+                        IntroChapterSnapshotStore.MarkerTypes);
                     if (IntroChapterSnapshotStore.Store(episode.InternalId, chapters))
                     {
                         captured++;
@@ -513,10 +513,10 @@ namespace ETKMediaInfoBridge
                 var item = this.libraryManager.GetItemById(itemId);
                 if (item is Episode && !string.IsNullOrEmpty(mediaInfoUrl))
                 {
-                    var chapters = this.itemRepository.GetChapters(
-                        itemId,
-                        IntroChapterSnapshotStore.MarkerTypes,
-                        CancellationToken.None);
+                    var chapters = EmbyRepositoryCompat.GetChapters(
+                        this.itemRepository,
+                        item,
+                        IntroChapterSnapshotStore.MarkerTypes);
                     IntroChapterSnapshotStore.Store(itemId, chapters);
                     if (IntroChapterSnapshotStore.NeedsSync(itemId, chapters))
                     {
