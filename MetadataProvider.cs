@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -43,6 +44,13 @@ namespace ETKMediaInfoBridge
         public string name { get; set; }
         public string tmdb_id { get; set; }
         public string[] member_tmdb_ids { get; set; }
+    }
+
+    internal sealed class EtkCollectionActivation
+    {
+        public string tmdb_collection_id { get; set; }
+        public long emby_collection_id { get; set; }
+        public string name { get; set; }
     }
 
     internal sealed class EtkMetadataPayload
@@ -222,6 +230,38 @@ namespace ETKMediaInfoBridge
                     RewriteImageUrls(url, payload);
                 }
                 return payload;
+            }
+        }
+
+        public static async Task<bool> NotifyCollectionActivatedAsync(
+            IJsonSerializer serializer,
+            ILibraryManager libraryManager,
+            string tmdbId,
+            long embyCollectionId,
+            string name,
+            CancellationToken cancellationToken)
+        {
+            var origin = ResolveEtkOrigin(libraryManager);
+            if (string.IsNullOrEmpty(origin) || string.IsNullOrWhiteSpace(tmdbId))
+            {
+                return false;
+            }
+            var payload = new EtkCollectionActivation
+            {
+                tmdb_collection_id = tmdbId.Trim(),
+                emby_collection_id = embyCollectionId,
+                name = name ?? string.Empty
+            };
+            using (var content = new StringContent(
+                serializer.SerializeToString(payload),
+                Encoding.UTF8,
+                "application/json"))
+            using (var response = await HttpClient.PostAsync(
+                origin + "/api/emby/collections/activate",
+                content,
+                cancellationToken).ConfigureAwait(false))
+            {
+                return response.IsSuccessStatusCode;
             }
         }
 

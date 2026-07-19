@@ -134,6 +134,21 @@ namespace ETKMediaInfoBridge
                             collection.name,
                             collection.tmdb_id,
                             movie.InternalId);
+                        var activated = await EtkMetadataClient.NotifyCollectionActivatedAsync(
+                            jsonSerializer,
+                            libraryManager,
+                            collection.tmdb_id,
+                            boxSet.InternalId,
+                            boxSet.Name,
+                            CancellationToken.None).ConfigureAwait(false);
+                        if (!activated)
+                        {
+                            logger.Warn(
+                                "ETK Collections failed to activate {0} (Tmdb={1}, Emby={2}).",
+                                boxSet.Name,
+                                collection.tmdb_id,
+                                boxSet.InternalId);
+                        }
                     }
                     else if (movie.CollectionFolders == null
                         || !movie.CollectionFolders.Any(item => item.InternalId == boxSet.InternalId))
