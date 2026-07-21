@@ -682,18 +682,15 @@ namespace ETKMediaInfoBridge
                     cancellationToken,
                     this.libraryManager).ConfigureAwait(false);
             }
-            if (payload?.images == null)
-            {
-                return;
-            }
-
             var libraryOptions = this.libraryManager.GetLibraryOptions(item);
-            var rules = EtkImagePolicy.GetRules(item, libraryOptions)
-                .Where(rule => replaceExisting || NeedsImage(item, rule))
-                .ToArray();
-            if (rules.Length == 0)
+            var rules = EtkImagePolicy.GetRules(item, libraryOptions);
+            var removed = this.PruneImages(item, rules);
+            if (removed > 0)
             {
-                return;
+                this.logger.Info(
+                    "ETK Images removed {0} images outside the library policy for Item {1}.",
+                    removed,
+                    itemId);
             }
 
             item.ProviderIds.TryGetValue("Tmdb", out var imageTmdbId);
@@ -712,7 +709,11 @@ namespace ETKMediaInfoBridge
                 false,
                 cancellationToken,
                 this.libraryManager).ConfigureAwait(false);
-            var candidates = synced?.images ?? EtkImagePolicy.FromCached(payload.images);
+            if (rules.Length == 0)
+            {
+                return;
+            }
+            var candidates = synced?.images ?? EtkImagePolicy.FromCached(payload?.images);
 
             var restored = 0;
             var selected = EtkImagePolicy.Apply(candidates, rules, "ETK Images").ToArray();
@@ -744,16 +745,34 @@ namespace ETKMediaInfoBridge
             }
         }
 
-        private static bool NeedsImage(BaseItem item, EtkImageRule rule)
+        private int PruneImages(BaseItem item, IEnumerable<EtkImageRule> rules)
         {
-            for (var index = 0; index < rule.Limit; index++)
+            var limits = rules.ToDictionary(
+                rule => rule.Type,
+                rule => Math.Max(0, rule.Limit));
+            var removed = 0;
+            foreach (var imageType in EtkImagePolicy.GetSupportedImages())
             {
-                if (!item.HasImage(rule.Type, index))
+                var keep = limits.TryGetValue(imageType, out var limit) ? limit : 0;
+                var count = item.GetImages(imageType).Count();
+                for (var index = count - 1; index >= keep; index--)
                 {
-                    return true;
+                    try
+                    {
+                        MediaInfoRefreshGuard.Suppress(item.InternalId);
+                        item.DeleteImage(imageType, index);
+                        removed++;
+                    }
+                    catch (Exception ex)
+                    {
+                        this.logger.ErrorException(
+                            "ETK Images failed to remove " + imageType
+                                + " index " + index + " for Item " + item.InternalId,
+                            ex);
+                    }
                 }
             }
-            return false;
+            return removed;
         }
 
         private async Task<int> SaveImageAsync(
