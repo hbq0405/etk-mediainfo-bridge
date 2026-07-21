@@ -380,25 +380,30 @@ namespace ETKMediaInfoBridge
                 : item.ParentIndexNumber;
             var episodeNumber = item is Episode ? item.IndexNumber : null;
             item.ProviderIds.TryGetValue("Tmdb", out var tmdbId);
+            var imageRules = EtkImagePolicy.GetRules(
+                item,
+                this.libraryManager.GetLibraryOptions(item));
             var refreshed = EtkMetadataClient.RefreshImagesAsync(
+                this.jsonSerializer,
                 item.Path,
                 itemType,
                 seasonNumber,
                 episodeNumber,
                 tmdbId,
+                imageRules,
                 CancellationToken.None,
                 this.libraryManager).GetAwaiter().GetResult();
             if (refreshed)
             {
                 this.replaceImagesUntil[itemId] = DateTime.UtcNow.AddMinutes(1);
                 this.logger.Info(
-                    "ETK Images refreshed the TMDb image snapshot before replacing images for Item {0}.",
+                    "ETK Images synchronized the image policy cache before replacing images for Item {0}.",
                     itemId);
             }
             else
             {
                 this.logger.Warn(
-                    "ETK Images could not refresh the TMDb image snapshot before replacing images for Item {0}.",
+                    "ETK Images could not synchronize the image policy cache before replacing images for Item {0}.",
                     itemId);
             }
         }
@@ -683,35 +688,49 @@ namespace ETKMediaInfoBridge
             }
 
             var libraryOptions = this.libraryManager.GetLibraryOptions(item);
+            var rules = EtkImagePolicy.GetRules(item, libraryOptions)
+                .Where(rule => replaceExisting || NeedsImage(item, rule))
+                .ToArray();
+            if (rules.Length == 0)
+            {
+                return;
+            }
+
+            item.ProviderIds.TryGetValue("Tmdb", out var imageTmdbId);
+            var synced = await EtkMetadataClient.SyncImagesAsync(
+                this.jsonSerializer,
+                item.Path,
+                itemType,
+                string.Equals(itemType, "Season", StringComparison.Ordinal)
+                    ? EtkMetadataClient.ResolveSeasonNumber(item.Path, item.IndexNumber)
+                    : item.ParentIndexNumber,
+                string.Equals(itemType, "Episode", StringComparison.Ordinal)
+                    ? item.IndexNumber
+                    : null,
+                imageTmdbId,
+                rules,
+                false,
+                cancellationToken,
+                this.libraryManager).ConfigureAwait(false);
+            var candidates = synced?.images ?? EtkImagePolicy.FromCached(payload.images);
+
             var restored = 0;
-            restored += await this.SaveImageAsync(
-                item, libraryOptions, payload.images.primary, ImageType.Primary,
-                replaceExisting, cancellationToken).ConfigureAwait(false);
-            if (!string.Equals(itemType, "Season", StringComparison.Ordinal)
-                && !string.Equals(itemType, "Episode", StringComparison.Ordinal)
-                && !string.Equals(itemType, "BoxSet", StringComparison.Ordinal))
+            var selected = EtkImagePolicy.Apply(candidates, rules, "ETK Images").ToArray();
+            foreach (var rule in rules)
             {
-                restored += await this.SaveImageAsync(
-                    item, libraryOptions, payload.images.backdrop, ImageType.Backdrop,
-                    replaceExisting, cancellationToken).ConfigureAwait(false);
-                restored += await this.SaveImageAsync(
-                    item, libraryOptions, payload.images.logo, ImageType.Logo,
-                    replaceExisting, cancellationToken).ConfigureAwait(false);
-                restored += await this.SaveImageAsync(
-                    item, libraryOptions, payload.images.thumb, ImageType.Thumb,
-                    replaceExisting, cancellationToken).ConfigureAwait(false);
-            }
-            else if (string.Equals(itemType, "Episode", StringComparison.Ordinal))
-            {
-                restored += await this.SaveImageAsync(
-                    item, libraryOptions, payload.images.thumb, ImageType.Thumb,
-                    replaceExisting, cancellationToken).ConfigureAwait(false);
-            }
-            else if (string.Equals(itemType, "BoxSet", StringComparison.Ordinal))
-            {
-                restored += await this.SaveImageAsync(
-                    item, libraryOptions, payload.images.backdrop, ImageType.Backdrop,
-                    replaceExisting, cancellationToken).ConfigureAwait(false);
+                var index = 0;
+                foreach (var image in selected.Where(value => value.Type == rule.Type))
+                {
+                    restored += await this.SaveImageAsync(
+                        item,
+                        libraryOptions,
+                        image.Url,
+                        rule.Type,
+                        rule.Type == ImageType.Backdrop ? index : (int?)null,
+                        replaceExisting,
+                        cancellationToken).ConfigureAwait(false);
+                    index++;
+                }
             }
 
             if (restored > 0)
@@ -725,16 +744,29 @@ namespace ETKMediaInfoBridge
             }
         }
 
+        private static bool NeedsImage(BaseItem item, EtkImageRule rule)
+        {
+            for (var index = 0; index < rule.Limit; index++)
+            {
+                if (!item.HasImage(rule.Type, index))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
         private async Task<int> SaveImageAsync(
             BaseItem item,
             MediaBrowser.Model.Configuration.LibraryOptions libraryOptions,
             string url,
             ImageType imageType,
+            int? imageIndex,
             bool replaceExisting,
             CancellationToken cancellationToken)
         {
             if (string.IsNullOrWhiteSpace(url)
-                || (!replaceExisting && item.HasImage(imageType, 0)))
+                || (!replaceExisting && item.HasImage(imageType, imageIndex ?? 0)))
             {
                 return 0;
             }
@@ -746,7 +778,7 @@ namespace ETKMediaInfoBridge
                     libraryOptions,
                     url,
                     imageType,
-                    null,
+                    imageIndex,
                     Array.Empty<long>(),
                     this.directoryService,
                     true,

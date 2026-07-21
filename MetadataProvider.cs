@@ -97,6 +97,154 @@ namespace ETKMediaInfoBridge
         public EtkRemoteImageCandidate[] images { get; set; }
     }
 
+    internal sealed class EtkImageSyncRule
+    {
+        public string type { get; set; }
+        public int limit { get; set; }
+        public int min_width { get; set; }
+    }
+
+    internal sealed class EtkImageSyncRequest
+    {
+        public bool force { get; set; }
+        public EtkImageSyncRule[] rules { get; set; }
+    }
+
+    internal sealed class EtkImageSyncResponse
+    {
+        public bool ok { get; set; }
+        public EtkRemoteImageCandidate[] images { get; set; }
+    }
+
+    internal sealed class EtkImageRule
+    {
+        public ImageType Type { get; set; }
+        public int Limit { get; set; }
+        public int MinWidth { get; set; }
+    }
+
+    internal static class EtkImagePolicy
+    {
+        private static readonly ImageType[] SupportedTypes =
+        {
+            ImageType.Primary,
+            ImageType.Art,
+            ImageType.Backdrop,
+            ImageType.Banner,
+            ImageType.Logo,
+            ImageType.Thumb,
+            ImageType.Disc
+        };
+
+        public static IEnumerable<ImageType> GetSupportedImages()
+        {
+            return SupportedTypes;
+        }
+
+        public static EtkImageRule[] GetRules(BaseItem item, LibraryOptions libraryOptions)
+        {
+            var itemType = item.GetType().Name;
+            var typeOptions = libraryOptions?.GetTypeOptions(itemType)
+                ?? new TypeOptions { Type = itemType };
+            return SupportedTypes
+                .Where(typeOptions.IsEnabled)
+                .Select(type => new EtkImageRule
+                {
+                    Type = type,
+                    Limit = type == ImageType.Backdrop
+                        ? Math.Max(1, typeOptions.GetLimit(type))
+                        : 1,
+                    MinWidth = Math.Max(0, typeOptions.GetMinWidth(type))
+                })
+                .ToArray();
+        }
+
+        public static EtkImageSyncRule[] ToSyncRules(IEnumerable<EtkImageRule> rules)
+        {
+            return rules.Select(rule => new EtkImageSyncRule
+            {
+                type = rule.Type.ToString(),
+                limit = rule.Limit,
+                min_width = rule.MinWidth
+            }).ToArray();
+        }
+
+        public static IEnumerable<RemoteImageInfo> Apply(
+            IEnumerable<EtkRemoteImageCandidate> candidates,
+            IEnumerable<EtkImageRule> rules,
+            string providerName)
+        {
+            var values = candidates ?? Array.Empty<EtkRemoteImageCandidate>();
+            foreach (var rule in rules)
+            {
+                var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var candidate in values.Where(value =>
+                    Enum.TryParse(value.type, true, out ImageType type)
+                    && type == rule.Type
+                    && !string.IsNullOrWhiteSpace(value.url)
+                    && (!value.width.HasValue || value.width.Value >= rule.MinWidth)))
+                {
+                    if (!seen.Add(candidate.url))
+                    {
+                        continue;
+                    }
+                    yield return new RemoteImageInfo
+                    {
+                        ProviderName = providerName,
+                        Url = candidate.url,
+                        ThumbnailUrl = string.IsNullOrWhiteSpace(candidate.thumbnail_url)
+                            ? candidate.url
+                            : candidate.thumbnail_url,
+                        Type = rule.Type,
+                        Language = candidate.language,
+                        DisplayLanguage = candidate.language,
+                        Width = candidate.width,
+                        Height = candidate.height,
+                        CommunityRating = candidate.community_rating,
+                        VoteCount = candidate.vote_count
+                    };
+                    if (seen.Count >= rule.Limit)
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+
+        public static EtkRemoteImageCandidate[] FromCached(EtkMetadataImages images)
+        {
+            if (images == null)
+            {
+                return Array.Empty<EtkRemoteImageCandidate>();
+            }
+            var candidates = new List<EtkRemoteImageCandidate>();
+            Add(candidates, images.primary, ImageType.Primary);
+            Add(candidates, images.backdrop, ImageType.Art);
+            Add(candidates, images.backdrop, ImageType.Backdrop);
+            Add(candidates, images.backdrop, ImageType.Banner);
+            Add(candidates, images.logo, ImageType.Logo);
+            Add(candidates, images.thumb ?? images.backdrop, ImageType.Thumb);
+            Add(candidates, images.primary, ImageType.Disc);
+            return candidates.ToArray();
+        }
+
+        private static void Add(
+            ICollection<EtkRemoteImageCandidate> candidates,
+            string url,
+            ImageType type)
+        {
+            if (!string.IsNullOrWhiteSpace(url))
+            {
+                candidates.Add(new EtkRemoteImageCandidate
+                {
+                    type = type.ToString(),
+                    url = url,
+                    thumbnail_url = url
+                });
+            }
+        }
+    }
+
     internal static class EtkMetadataClient
     {
         private static readonly HttpClient HttpClient = new HttpClient
@@ -296,38 +444,86 @@ namespace ETKMediaInfoBridge
         }
 
         public static async Task<bool> RefreshImagesAsync(
+            IJsonSerializer serializer,
             string itemPath,
             string itemType,
             int? seasonNumber,
             int? episodeNumber,
             string tmdbId,
+            IEnumerable<EtkImageRule> rules,
+            CancellationToken cancellationToken,
+            ILibraryManager libraryManager)
+        {
+            var result = await SyncImagesAsync(
+                serializer,
+                itemPath,
+                itemType,
+                seasonNumber,
+                episodeNumber,
+                tmdbId,
+                rules,
+                true,
+                cancellationToken,
+                libraryManager).ConfigureAwait(false);
+            if (result != null)
+            {
+                Cache.Clear();
+                return true;
+            }
+            return false;
+        }
+
+        public static async Task<EtkImageSyncResponse> SyncImagesAsync(
+            IJsonSerializer serializer,
+            string itemPath,
+            string itemType,
+            int? seasonNumber,
+            int? episodeNumber,
+            string tmdbId,
+            IEnumerable<EtkImageRule> rules,
+            bool force,
             CancellationToken cancellationToken,
             ILibraryManager libraryManager)
         {
             var origin = ResolveEtkOrigin(libraryManager);
             if (string.IsNullOrEmpty(origin))
             {
-                return false;
+                return null;
             }
             var url = BuildImageApiUrl(
                 origin,
-                "refresh",
+                "sync",
                 itemPath,
                 itemType,
                 seasonNumber,
                 episodeNumber,
                 tmdbId);
+            var payload = new EtkImageSyncRequest
+            {
+                force = force,
+                rules = EtkImagePolicy.ToSyncRules(rules)
+            };
+            using (var content = new StringContent(
+                serializer.SerializeToString(payload),
+                Encoding.UTF8,
+                "application/json"))
             using (var response = await ImageRefreshHttpClient.PostAsync(
                 url,
-                new StringContent(string.Empty),
+                content,
                 cancellationToken).ConfigureAwait(false))
             {
                 if (!response.IsSuccessStatusCode)
                 {
-                    return false;
+                    return null;
                 }
-                Cache.Clear();
-                return true;
+                var json = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                var result = serializer.DeserializeFromString<EtkImageSyncResponse>(json);
+                if (result == null)
+                {
+                    return null;
+                }
+                RewriteCandidateUrls(origin, result.images);
+                return result;
             }
         }
 
@@ -365,13 +561,20 @@ namespace ETKMediaInfoBridge
                 var json = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
                 var payload = serializer.DeserializeFromString<EtkRemoteImageSearchResponse>(json);
                 var images = payload?.images ?? Array.Empty<EtkRemoteImageCandidate>();
-                var originUri = new Uri(origin, UriKind.Absolute);
-                foreach (var image in images)
-                {
-                    image.url = BuildImageProxyUrl(originUri, image.url);
-                    image.thumbnail_url = BuildImageProxyUrl(originUri, image.thumbnail_url);
-                }
+                RewriteCandidateUrls(origin, images);
                 return images;
+            }
+        }
+
+        private static void RewriteCandidateUrls(
+            string origin,
+            IEnumerable<EtkRemoteImageCandidate> images)
+        {
+            var originUri = new Uri(origin, UriKind.Absolute);
+            foreach (var image in images ?? Array.Empty<EtkRemoteImageCandidate>())
+            {
+                image.url = BuildImageProxyUrl(originUri, image.url);
+                image.thumbnail_url = BuildImageProxyUrl(originUri, image.thumbnail_url);
             }
         }
 
@@ -998,19 +1201,7 @@ namespace ETKMediaInfoBridge
 
         public IEnumerable<ImageType> GetSupportedImages(BaseItem item)
         {
-            if (item is Season)
-            {
-                return new[] { ImageType.Primary };
-            }
-            if (item is Episode)
-            {
-                return new[] { ImageType.Primary, ImageType.Thumb };
-            }
-            if (item is BoxSet)
-            {
-                return new[] { ImageType.Primary, ImageType.Backdrop };
-            }
-            return new[] { ImageType.Primary, ImageType.Backdrop, ImageType.Logo, ImageType.Thumb };
+            return EtkImagePolicy.GetSupportedImages();
         }
 
         public async Task<IEnumerable<RemoteImageInfo>> GetImages(
@@ -1028,6 +1219,38 @@ namespace ETKMediaInfoBridge
                     cancellationToken).ConfigureAwait(false);
             }
 
+            var rules = EtkImagePolicy.GetRules(item, libraryOptions);
+            if (rules.Length == 0)
+            {
+                return Array.Empty<RemoteImageInfo>();
+            }
+
+            item.ProviderIds.TryGetValue("Tmdb", out var tmdbId);
+            var synced = await EtkMetadataClient.SyncImagesAsync(
+                this.jsonSerializer,
+                item.Path,
+                item is Movie ? "Movie"
+                    : item is Series ? "Series"
+                    : item is Season ? "Season"
+                    : item is Episode ? "Episode"
+                    : "BoxSet",
+                item is Season
+                    ? EtkMetadataClient.ResolveSeasonNumber(item.Path, item.IndexNumber)
+                    : item.ParentIndexNumber,
+                item is Episode ? item.IndexNumber : null,
+                tmdbId,
+                rules,
+                false,
+                cancellationToken,
+                this.libraryManager).ConfigureAwait(false);
+            if (synced != null)
+            {
+                return EtkImagePolicy.Apply(
+                    synced.images,
+                    rules,
+                    this.Name).ToArray();
+            }
+
             if (item is BoxSet)
             {
                 item.ProviderIds.TryGetValue("Tmdb", out var collectionTmdbId);
@@ -1040,10 +1263,10 @@ namespace ETKMediaInfoBridge
                 {
                     return Array.Empty<RemoteImageInfo>();
                 }
-                var collectionImages = new List<RemoteImageInfo>();
-                Add(collectionImages, collection.images.primary, ImageType.Primary);
-                Add(collectionImages, collection.images.backdrop, ImageType.Backdrop);
-                return collectionImages;
+                return EtkImagePolicy.Apply(
+                    EtkImagePolicy.FromCached(collection.images),
+                    rules,
+                    this.Name).ToArray();
             }
 
             var itemType = item is Movie ? "Movie"
@@ -1064,21 +1287,35 @@ namespace ETKMediaInfoBridge
             {
                 return Array.Empty<RemoteImageInfo>();
             }
-            var cached = new List<RemoteImageInfo>();
-            Add(cached, payload.images.primary, ImageType.Primary);
-            if (!(item is Season))
-            {
-                if (!(item is Episode))
-                {
-                    Add(cached, payload.images.backdrop, ImageType.Backdrop);
-                    Add(cached, payload.images.logo, ImageType.Logo);
-                }
-                Add(cached, payload.images.thumb, ImageType.Thumb);
-            }
-            return cached;
+            return EtkImagePolicy.Apply(
+                EtkImagePolicy.FromCached(payload.images),
+                rules,
+                this.Name).ToArray();
         }
 
         private async Task<IEnumerable<RemoteImageInfo>> GetLiveImages(
+            BaseItem item,
+            bool includeAllLanguages,
+            CancellationToken cancellationToken)
+        {
+            var candidates = await this.GetLiveCandidates(
+                item,
+                includeAllLanguages,
+                cancellationToken).ConfigureAwait(false);
+            var result = new List<RemoteImageInfo>();
+            foreach (var candidate in candidates)
+            {
+                if (!Enum.TryParse(candidate.type, true, out ImageType imageType)
+                    || string.IsNullOrWhiteSpace(candidate.url))
+                {
+                    continue;
+                }
+                result.Add(ToRemoteImage(candidate, imageType));
+            }
+            return result;
+        }
+
+        private async Task<EtkRemoteImageCandidate[]> GetLiveCandidates(
             BaseItem item,
             bool includeAllLanguages,
             CancellationToken cancellationToken)
@@ -1101,31 +1338,7 @@ namespace ETKMediaInfoBridge
                 includeAllLanguages,
                 cancellationToken,
                 this.libraryManager).ConfigureAwait(false);
-            var result = new List<RemoteImageInfo>();
-            foreach (var candidate in candidates)
-            {
-                if (!Enum.TryParse(candidate.type, true, out ImageType imageType)
-                    || string.IsNullOrWhiteSpace(candidate.url))
-                {
-                    continue;
-                }
-                result.Add(new RemoteImageInfo
-                {
-                    ProviderName = this.Name,
-                    Url = candidate.url,
-                    ThumbnailUrl = string.IsNullOrWhiteSpace(candidate.thumbnail_url)
-                        ? candidate.url
-                        : candidate.thumbnail_url,
-                    Type = imageType,
-                    Language = candidate.language,
-                    DisplayLanguage = candidate.language,
-                    Width = candidate.width,
-                    Height = candidate.height,
-                    CommunityRating = candidate.community_rating,
-                    VoteCount = candidate.vote_count
-                });
-            }
-            return result;
+            return candidates;
         }
 
         public Task<HttpResponseInfo> GetImageResponse(string url, CancellationToken cancellationToken)
@@ -1138,18 +1351,23 @@ namespace ETKMediaInfoBridge
             });
         }
 
-        private static void Add(List<RemoteImageInfo> images, string url, ImageType type)
+        private RemoteImageInfo ToRemoteImage(EtkRemoteImageCandidate candidate, ImageType type)
         {
-            if (!string.IsNullOrWhiteSpace(url))
+            return new RemoteImageInfo
             {
-                images.Add(new RemoteImageInfo
-                {
-                    ProviderName = "ETK Images",
-                    Url = url,
-                    ThumbnailUrl = url,
-                    Type = type
-                });
-            }
+                ProviderName = this.Name,
+                Url = candidate.url,
+                ThumbnailUrl = string.IsNullOrWhiteSpace(candidate.thumbnail_url)
+                    ? candidate.url
+                    : candidate.thumbnail_url,
+                Type = type,
+                Language = candidate.language,
+                DisplayLanguage = candidate.language,
+                Width = candidate.width,
+                Height = candidate.height,
+                CommunityRating = candidate.community_rating,
+                VoteCount = candidate.vote_count
+            };
         }
 
     }
