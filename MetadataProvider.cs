@@ -920,8 +920,7 @@ namespace ETKMediaInfoBridge
                 HasMetadata = true,
                 Item = item,
                 Provider = this.Name,
-                ResultLanguage = "zh-CN",
-                SearchImageUrl = payload.images?.primary
+                ResultLanguage = "zh-CN"
             };
             if (payload.actors_ready)
             {
@@ -1153,8 +1152,7 @@ namespace ETKMediaInfoBridge
                 HasMetadata = true,
                 Item = item,
                 Provider = this.Name,
-                ResultLanguage = "zh-CN",
-                SearchImageUrl = payload.images?.primary
+                ResultLanguage = "zh-CN"
             };
         }
 
