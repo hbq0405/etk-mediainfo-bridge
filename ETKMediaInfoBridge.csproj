@@ -3,7 +3,7 @@
     <TargetFramework>netstandard2.0</TargetFramework>
     <AssemblyName>ETKMediaInfoBridge</AssemblyName>
     <RootNamespace>ETKMediaInfoBridge</RootNamespace>
-    <Version>1.3.18</Version>
+    <Version>1.3.19</Version>
     <Nullable>disable</Nullable>
   </PropertyGroup>
 
