@@ -717,7 +717,12 @@ namespace ETKMediaInfoBridge
 
             var restored = 0;
             var selected = EtkImagePolicy.Apply(candidates, rules, "ETK Images").ToArray();
-            foreach (var rule in rules)
+            var downloadRules = !replaceExisting
+                && libraryOptions != null
+                && !libraryOptions.DownloadImagesInAdvance
+                    ? rules.Where(rule => rule.Type == ImageType.Primary)
+                    : rules;
+            foreach (var rule in downloadRules)
             {
                 var index = 0;
                 foreach (var image in selected.Where(value => value.Type == rule.Type))
