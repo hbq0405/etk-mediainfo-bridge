@@ -740,7 +740,7 @@ namespace ETKMediaInfoBridge
                 var downloadLimit = rule.Limit;
                 if (libraryOptions != null
                     && !libraryOptions.DownloadImagesInAdvance
-                    && rule.Type != ImageType.Primary)
+                    && (rule.Type != ImageType.Primary || item is Episode))
                 {
                     if (!replaceExisting
                         || downloadedCounts == null
