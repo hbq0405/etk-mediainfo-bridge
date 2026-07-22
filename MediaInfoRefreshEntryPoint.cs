@@ -208,6 +208,7 @@ namespace ETKMediaInfoBridge
         {
             public DateTime ExpiresAt { get; set; }
             public Dictionary<ImageType, int> DownloadedCounts { get; set; }
+            public bool PolicyRefreshed { get; set; }
         }
 
         private static readonly HttpClient HttpClient = new HttpClient
@@ -406,9 +407,32 @@ namespace ETKMediaInfoBridge
             {
                 this.replaceImageStates[itemId] = new ReplaceImageState
                 {
-                    ExpiresAt = DateTime.UtcNow.AddMinutes(1),
-                    DownloadedCounts = downloadedCounts
+                    ExpiresAt = DateTime.UtcNow.AddMinutes(10),
+                    DownloadedCounts = downloadedCounts,
+                    PolicyRefreshed = true
                 };
+                if (item is Series || item is Season)
+                {
+                    foreach (var episode in this.libraryManager.GetItemList(new InternalItemsQuery
+                    {
+                        Parent = item,
+                        Recursive = true,
+                        IncludeItemTypes = new[] { "Episode" }
+                    }))
+                    {
+                        var episodeRules = EtkImagePolicy.GetRules(
+                            episode,
+                            this.libraryManager.GetLibraryOptions(episode));
+                        this.replaceImageStates[episode.InternalId] = new ReplaceImageState
+                        {
+                            ExpiresAt = DateTime.UtcNow.AddMinutes(10),
+                            DownloadedCounts = episodeRules.ToDictionary(
+                                rule => rule.Type,
+                                rule => episode.GetImages(rule.Type).Count()),
+                            PolicyRefreshed = false
+                        };
+                    }
+                }
                 this.logger.Info(
                     "ETK Images synchronized the image policy cache before replacing images for Item {0}.",
                     itemId);
@@ -576,6 +600,7 @@ namespace ETKMediaInfoBridge
                     itemId,
                     replaceState != null,
                     replaceState?.DownloadedCounts,
+                    replaceState != null && !replaceState.PolicyRefreshed,
                     CancellationToken.None).ConfigureAwait(false);
                 await EtkCollectionRestorer.RestoreAsync(
                     this.libraryManager,
@@ -659,6 +684,7 @@ namespace ETKMediaInfoBridge
             long itemId,
             bool replaceExisting,
             IReadOnlyDictionary<ImageType, int> downloadedCounts,
+            bool refreshPolicy,
             CancellationToken cancellationToken)
         {
             var item = this.libraryManager.GetItemById(itemId);
@@ -724,7 +750,7 @@ namespace ETKMediaInfoBridge
                     : null,
                 imageTmdbId,
                 rules,
-                false,
+                refreshPolicy,
                 cancellationToken,
                 this.libraryManager).ConfigureAwait(false);
             if (rules.Length == 0)
@@ -738,9 +764,13 @@ namespace ETKMediaInfoBridge
             foreach (var rule in rules)
             {
                 var downloadLimit = rule.Limit;
+                var explicitEpisodePrimary = replaceExisting
+                    && item is Episode
+                    && rule.Type == ImageType.Primary;
                 if (libraryOptions != null
                     && !libraryOptions.DownloadImagesInAdvance
-                    && (rule.Type != ImageType.Primary || item is Episode))
+                    && (rule.Type != ImageType.Primary || item is Episode)
+                    && !explicitEpisodePrimary)
                 {
                     if (!replaceExisting
                         || downloadedCounts == null
