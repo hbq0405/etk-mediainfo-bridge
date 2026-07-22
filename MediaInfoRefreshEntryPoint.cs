@@ -204,6 +204,12 @@ namespace ETKMediaInfoBridge
 
     public sealed class MediaInfoRefreshEntryPoint : IServerEntryPoint, IDisposable
     {
+        private sealed class ReplaceImageState
+        {
+            public DateTime ExpiresAt { get; set; }
+            public Dictionary<ImageType, int> DownloadedCounts { get; set; }
+        }
+
         private static readonly HttpClient HttpClient = new HttpClient
         {
             Timeout = TimeSpan.FromSeconds(15)
@@ -221,8 +227,8 @@ namespace ETKMediaInfoBridge
         private readonly ILogger logger;
         private readonly ConcurrentDictionary<long, CancellationTokenSource> pending =
             new ConcurrentDictionary<long, CancellationTokenSource>();
-        private readonly ConcurrentDictionary<long, DateTime> replaceImagesUntil =
-            new ConcurrentDictionary<long, DateTime>();
+        private readonly ConcurrentDictionary<long, ReplaceImageState> replaceImageStates =
+            new ConcurrentDictionary<long, ReplaceImageState>();
         private bool disposed;
 
         public MediaInfoRefreshEntryPoint(
@@ -383,6 +389,9 @@ namespace ETKMediaInfoBridge
             var imageRules = EtkImagePolicy.GetRules(
                 item,
                 this.libraryManager.GetLibraryOptions(item));
+            var downloadedCounts = imageRules.ToDictionary(
+                rule => rule.Type,
+                rule => item.GetImages(rule.Type).Count());
             var refreshed = EtkMetadataClient.RefreshImagesAsync(
                 this.jsonSerializer,
                 item.Path,
@@ -395,7 +404,11 @@ namespace ETKMediaInfoBridge
                 this.libraryManager).GetAwaiter().GetResult();
             if (refreshed)
             {
-                this.replaceImagesUntil[itemId] = DateTime.UtcNow.AddMinutes(1);
+                this.replaceImageStates[itemId] = new ReplaceImageState
+                {
+                    ExpiresAt = DateTime.UtcNow.AddMinutes(1),
+                    DownloadedCounts = downloadedCounts
+                };
                 this.logger.Info(
                     "ETK Images synchronized the image policy cache before replacing images for Item {0}.",
                     itemId);
@@ -558,9 +571,11 @@ namespace ETKMediaInfoBridge
                         await this.NotifyItemReadyAsync(mediaInfoUrl, itemId).ConfigureAwait(false);
                     }
                 }
+                var replaceState = this.TakeReplaceImageState(itemId);
                 await this.RestoreImagesAsync(
                     itemId,
-                    this.ShouldReplaceImages(itemId),
+                    replaceState != null,
+                    replaceState?.DownloadedCounts,
                     CancellationToken.None).ConfigureAwait(false);
                 await EtkCollectionRestorer.RestoreAsync(
                     this.libraryManager,
@@ -632,15 +647,18 @@ namespace ETKMediaInfoBridge
             }
         }
 
-        private bool ShouldReplaceImages(long itemId)
+        private ReplaceImageState TakeReplaceImageState(long itemId)
         {
-            return this.replaceImagesUntil.TryRemove(itemId, out var until)
-                && until > DateTime.UtcNow;
+            return this.replaceImageStates.TryRemove(itemId, out var state)
+                && state.ExpiresAt > DateTime.UtcNow
+                    ? state
+                    : null;
         }
 
         private async Task RestoreImagesAsync(
             long itemId,
             bool replaceExisting,
+            IReadOnlyDictionary<ImageType, int> downloadedCounts,
             CancellationToken cancellationToken)
         {
             var item = this.libraryManager.GetItemById(itemId);
@@ -717,15 +735,25 @@ namespace ETKMediaInfoBridge
 
             var restored = 0;
             var selected = EtkImagePolicy.Apply(candidates, rules, "ETK Images").ToArray();
-            var downloadRules = !replaceExisting
-                && libraryOptions != null
-                && !libraryOptions.DownloadImagesInAdvance
-                    ? rules.Where(rule => rule.Type == ImageType.Primary)
-                    : rules;
-            foreach (var rule in downloadRules)
+            foreach (var rule in rules)
             {
+                var downloadLimit = rule.Limit;
+                if (libraryOptions != null
+                    && !libraryOptions.DownloadImagesInAdvance
+                    && rule.Type != ImageType.Primary)
+                {
+                    if (!replaceExisting
+                        || downloadedCounts == null
+                        || !downloadedCounts.TryGetValue(rule.Type, out var downloadedCount))
+                    {
+                        continue;
+                    }
+                    downloadLimit = Math.Min(downloadLimit, downloadedCount);
+                }
                 var index = 0;
-                foreach (var image in selected.Where(value => value.Type == rule.Type))
+                foreach (var image in selected
+                    .Where(value => value.Type == rule.Type)
+                    .Take(downloadLimit))
                 {
                     restored += await this.SaveImageAsync(
                         item,
@@ -878,7 +906,7 @@ namespace ETKMediaInfoBridge
                 }
             }
             this.pending.Clear();
-            this.replaceImagesUntil.Clear();
+            this.replaceImageStates.Clear();
         }
     }
 }
