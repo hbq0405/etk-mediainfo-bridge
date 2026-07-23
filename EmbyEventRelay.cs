@@ -9,6 +9,7 @@ using System.Threading.Tasks;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Controller.Collections;
 using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Plugins;
 using MediaBrowser.Controller.Session;
@@ -35,6 +36,8 @@ namespace ETKMediaInfoBridge
         private readonly IJsonSerializer jsonSerializer;
         private readonly ILogger logger;
         private readonly ConcurrentDictionary<string, bool> pauseStates =
+            new ConcurrentDictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        private readonly ConcurrentDictionary<string, bool> halfwayReports =
             new ConcurrentDictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
         private string webhookUrl;
         private bool disposed;
@@ -179,12 +182,43 @@ namespace ETKMediaInfoBridge
             {
                 this.QueuePlaybackEvent("playback.start", eventArgs, false);
             }
+            this.QueueHalfwayEvent(eventArgs);
         }
 
         private void OnPlaybackStopped(object sender, PlaybackStopEventArgs eventArgs)
         {
             this.pauseStates.TryRemove(PlaybackKey(eventArgs), out _);
+            var halfwayKey = HalfwayPlaybackKey(eventArgs);
+            if (!string.IsNullOrEmpty(halfwayKey))
+            {
+                this.halfwayReports.TryRemove(halfwayKey, out _);
+            }
             this.QueuePlaybackEvent("playback.stop", eventArgs, eventArgs.PlayedToCompletion);
+        }
+
+        private void QueueHalfwayEvent(PlaybackProgressEventArgs eventArgs)
+        {
+            if (eventArgs?.Item == null || !(eventArgs.Item is Episode))
+            {
+                return;
+            }
+
+            long? runTimeTicks = eventArgs.Item.RunTimeTicks;
+            long? positionTicks = eventArgs.PlaybackPositionTicks;
+            if (!runTimeTicks.HasValue
+                || runTimeTicks.Value <= 0
+                || !positionTicks.HasValue
+                || positionTicks.Value < runTimeTicks.Value / 2)
+            {
+                return;
+            }
+
+            var key = HalfwayPlaybackKey(eventArgs);
+            if (string.IsNullOrEmpty(key) || !this.halfwayReports.TryAdd(key, true))
+            {
+                return;
+            }
+            this.QueuePlaybackEvent("playback.halfway", eventArgs, false);
         }
 
         private void OnUserDataSaved(object sender, UserDataSaveEventArgs eventArgs)
@@ -349,6 +383,7 @@ namespace ETKMediaInfoBridge
                 ["RunTimeTicks"] = item.RunTimeTicks
             };
             AddReflectedValue(payload, item, "SeriesId");
+            AddReflectedValue(payload, item, "SeasonId");
             AddReflectedValue(payload, item, "SeriesName");
             AddReflectedValue(payload, item, "IndexNumber");
             AddReflectedValue(payload, item, "ParentIndexNumber");
@@ -396,6 +431,15 @@ namespace ETKMediaInfoBridge
                 ?? string.Empty;
         }
 
+        private static string HalfwayPlaybackKey(PlaybackProgressEventArgs eventArgs)
+        {
+            if (eventArgs?.Item == null || string.IsNullOrEmpty(eventArgs.PlaySessionId))
+            {
+                return null;
+            }
+            return eventArgs.PlaySessionId + ":" + eventArgs.Item.InternalId;
+        }
+
         public void Dispose()
         {
             if (this.disposed)
@@ -414,6 +458,7 @@ namespace ETKMediaInfoBridge
             this.userManager.UserPolicyUpdated -= this.OnUserPolicyUpdated;
             this.collectionManager.ItemsRemovedFromCollection -= this.OnItemsRemovedFromCollection;
             this.pauseStates.Clear();
+            this.halfwayReports.Clear();
         }
     }
 }

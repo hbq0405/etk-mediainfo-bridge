@@ -297,6 +297,12 @@ namespace ETKMediaInfoBridge
                         this.itemRepository,
                         episode,
                         IntroChapterSnapshotStore.MarkerTypes);
+                    CreditsChapterSnapshotStore.Store(
+                        episode.InternalId,
+                        EmbyRepositoryCompat.GetChapters(
+                            this.itemRepository,
+                            episode,
+                            CreditsChapterSnapshotStore.MarkerTypes));
                     if (IntroChapterSnapshotStore.Store(episode.InternalId, chapters))
                     {
                         captured++;
@@ -559,6 +565,12 @@ namespace ETKMediaInfoBridge
                         this.itemRepository,
                         item,
                         IntroChapterSnapshotStore.MarkerTypes);
+                    CreditsChapterSnapshotStore.Store(
+                        itemId,
+                        EmbyRepositoryCompat.GetChapters(
+                            this.itemRepository,
+                            item,
+                            CreditsChapterSnapshotStore.MarkerTypes));
                     IntroChapterSnapshotStore.Store(itemId, chapters);
                     if (IntroChapterSnapshotStore.NeedsSync(itemId, chapters))
                     {
