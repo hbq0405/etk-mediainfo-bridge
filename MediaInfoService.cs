@@ -145,6 +145,13 @@ namespace ETKMediaInfoBridge
             }
         }
 
+        public static void Clear(long itemId)
+        {
+            List<ChapterInfo> removed;
+            Snapshots.TryRemove(itemId, out removed);
+            SyncedSnapshots.TryRemove(itemId, out removed);
+        }
+
         public static bool HasCompleteIntro(IEnumerable<ChapterInfo> chapters)
         {
             var values = (chapters ?? Enumerable.Empty<ChapterInfo>()).ToList();
@@ -184,6 +191,12 @@ namespace ETKMediaInfoBridge
             }
             Snapshots[itemId] = creditsChapters;
             return true;
+        }
+
+        public static void Clear(long itemId)
+        {
+            List<ChapterInfo> removed;
+            Snapshots.TryRemove(itemId, out removed);
         }
 
         public static bool HasCredits(IEnumerable<ChapterInfo> chapters)
@@ -264,6 +277,41 @@ namespace ETKMediaInfoBridge
         public long CreditsStartTicks { get; set; }
     }
 
+    [Route("/Items/{Id}/ETKMediaInfo/Chapters", "POST", Summary = "Updates ETK intro and credits chapters")]
+    [Authenticated(Roles = "Admin")]
+    public sealed class UpdateEtkChapters : IReturn<UpdateEtkChaptersResult>
+    {
+        [ApiMember(Name = "Id", IsRequired = true, DataType = "long", ParameterType = "path", Verb = "POST")]
+        public long Id { get; set; }
+
+        public long? IntroStartTicks { get; set; }
+
+        public long? IntroEndTicks { get; set; }
+
+        public long? CreditsStartTicks { get; set; }
+
+        public bool ClearIntro { get; set; }
+
+        public bool ClearCredits { get; set; }
+    }
+
+    public sealed class UpdateEtkChaptersResult
+    {
+        public long ItemId { get; set; }
+
+        public int ChapterCount { get; set; }
+
+        public bool HasIntro { get; set; }
+
+        public bool HasCredits { get; set; }
+
+        public long? IntroStartTicks { get; set; }
+
+        public long? IntroEndTicks { get; set; }
+
+        public long? CreditsStartTicks { get; set; }
+    }
+
     [Route("/ETKMediaInfo/Origin", "POST", Summary = "Configures the ETK server origin")]
     [Authenticated(Roles = "Admin")]
     public sealed class ConfigureEtkOrigin : IReturn<ConfigureEtkOriginResult>
@@ -320,6 +368,19 @@ namespace ETKMediaInfoBridge
                 this.itemRepository,
                 request.Id,
                 request.CreditsStartTicks);
+        }
+
+        public UpdateEtkChaptersResult Post(UpdateEtkChapters request)
+        {
+            return MediaInfoImporter.UpdateChapters(
+                this.libraryManager,
+                this.itemRepository,
+                request.Id,
+                request.IntroStartTicks,
+                request.IntroEndTicks,
+                request.CreditsStartTicks,
+                request.ClearIntro,
+                request.ClearCredits);
         }
 
         public ConfigureEtkOriginResult Post(ConfigureEtkOrigin request)
@@ -420,6 +481,109 @@ namespace ETKMediaInfoBridge
                 ChapterCount = chapters.Count,
                 IntroStartTicks = introStartTicks,
                 IntroEndTicks = introEndTicks
+            };
+        }
+
+        public static UpdateEtkChaptersResult UpdateChapters(
+            ILibraryManager libraryManager,
+            IItemRepository itemRepository,
+            long itemId,
+            long? introStartTicks,
+            long? introEndTicks,
+            long? creditsStartTicks,
+            bool clearIntro,
+            bool clearCredits)
+        {
+            var item = libraryManager.GetItemById(itemId);
+            if (item == null)
+            {
+                throw new ArgumentException("Emby item was not found.", nameof(itemId));
+            }
+
+            var updateIntro = clearIntro || introStartTicks.HasValue || introEndTicks.HasValue;
+            var updateCredits = clearCredits || creditsStartTicks.HasValue;
+            var chapters = EmbyRepositoryCompat.GetChapters(itemRepository, item)
+                .Where(chapter => chapter != null)
+                .ToList();
+
+            if (updateIntro)
+            {
+                chapters = chapters
+                    .Where(chapter => !IntroChapterSnapshotStore.IsIntroChapter(chapter))
+                    .ToList();
+                IntroChapterSnapshotStore.Clear(item.InternalId);
+            }
+
+            if (updateCredits)
+            {
+                chapters = chapters
+                    .Where(chapter => !CreditsChapterSnapshotStore.IsCreditsChapter(chapter))
+                    .ToList();
+                CreditsChapterSnapshotStore.Clear(item.InternalId);
+            }
+
+            if (!clearIntro && (introStartTicks.HasValue || introEndTicks.HasValue))
+            {
+                if (!introStartTicks.HasValue || !introEndTicks.HasValue)
+                {
+                    throw new ArgumentException("Both intro start and intro end ticks are required.");
+                }
+                if (introStartTicks.Value < 0 || introEndTicks.Value <= introStartTicks.Value)
+                {
+                    throw new ArgumentException("ETK intro chapter ticks are invalid.");
+                }
+                chapters.Add(new ChapterInfo
+                {
+                    MarkerType = MarkerType.IntroStart,
+                    StartPositionTicks = introStartTicks.Value
+                });
+                chapters.Add(new ChapterInfo
+                {
+                    MarkerType = MarkerType.IntroEnd,
+                    StartPositionTicks = introEndTicks.Value
+                });
+            }
+
+            if (!clearCredits && creditsStartTicks.HasValue)
+            {
+                long? runTimeTicks = item.RunTimeTicks;
+                if (creditsStartTicks.Value < 0
+                    || (runTimeTicks.HasValue
+                        && runTimeTicks.Value > 0
+                        && creditsStartTicks.Value >= runTimeTicks.Value))
+                {
+                    throw new ArgumentException("ETK credits chapter ticks are invalid.");
+                }
+                chapters.Add(new ChapterInfo
+                {
+                    MarkerType = MarkerType.CreditsStart,
+                    StartPositionTicks = creditsStartTicks.Value
+                });
+            }
+
+            itemRepository.SaveChapters(item.InternalId, chapters);
+            IntroChapterSnapshotStore.Store(item.InternalId, chapters);
+            IntroChapterSnapshotStore.MarkSynced(item.InternalId, chapters);
+            CreditsChapterSnapshotStore.Store(item.InternalId, chapters);
+
+            var introChapters = chapters
+                .Where(IntroChapterSnapshotStore.IsIntroChapter)
+                .ToList();
+            var creditsChapter = chapters.FirstOrDefault(CreditsChapterSnapshotStore.IsCreditsChapter);
+
+            return new UpdateEtkChaptersResult
+            {
+                ItemId = item.InternalId,
+                ChapterCount = chapters.Count,
+                HasIntro = IntroChapterSnapshotStore.HasCompleteIntro(introChapters),
+                HasCredits = creditsChapter != null,
+                IntroStartTicks = introChapters
+                    .FirstOrDefault(chapter => chapter.MarkerType == MarkerType.IntroStart)
+                    ?.StartPositionTicks,
+                IntroEndTicks = introChapters
+                    .FirstOrDefault(chapter => chapter.MarkerType == MarkerType.IntroEnd)
+                    ?.StartPositionTicks,
+                CreditsStartTicks = creditsChapter?.StartPositionTicks
             };
         }
 
