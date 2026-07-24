@@ -32,11 +32,11 @@ namespace ETKMediaInfoBridge
             this.logger = logger;
         }
 
-        public string Name => "ETK 自主片头提取兜底";
+        public string Name => "片头片尾提取";
 
         public string Key => "ETKIntroDetectionBackfill";
 
-        public string Description => "通知已注册的 ETK 服务扫描在库剧集并补齐缺失片头章节。";
+        public string Description => "通知已注册的 ETK 服务扫描在库剧集并补齐缺失片头片尾章节。";
 
         public string Category => "ETK MediaInfo Bridge";
 
@@ -65,11 +65,11 @@ namespace ETKMediaInfoBridge
             var etkOrigin = EtkMetadataClient.GetEtkOrigin(this.libraryManager);
             if (string.IsNullOrWhiteSpace(etkOrigin))
             {
-                throw new InvalidOperationException("无法确定 ETK 服务地址，无法触发自主片头提取兜底。");
+                throw new InvalidOperationException("无法确定 ETK 服务地址，无法触发片头片尾提取。");
             }
 
             var endpoint = etkOrigin.TrimEnd('/') + "/api/emby/intro-detection/backfill";
-            this.logger.Info("Submitting ETK intro detection backfill to {0}.", endpoint);
+            this.logger.Info("正在提交 ETK 片头片尾提取任务：{0}", endpoint);
             progress.Report(10);
 
             using (var response = await HttpClient.PostAsync(
@@ -81,7 +81,7 @@ namespace ETKMediaInfoBridge
                 if (!response.IsSuccessStatusCode)
                 {
                     throw new HttpRequestException(
-                        "ETK 自主片头提取兜底提交失败: HTTP "
+                        "ETK 片头片尾提取提交失败: HTTP "
                         + (int)response.StatusCode
                         + " "
                         + body);
@@ -89,7 +89,7 @@ namespace ETKMediaInfoBridge
             }
 
             progress.Report(100);
-            this.logger.Info("ETK intro detection backfill submitted successfully.");
+            this.logger.Info("ETK 片头片尾提取任务已提交。");
         }
     }
 }
