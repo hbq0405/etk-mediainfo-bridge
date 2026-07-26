@@ -79,29 +79,33 @@ namespace ETKMediaInfoBridge
                 }
                 var replaceValue = __0?.GetType().GetProperty("ReplaceAllImages")?.GetValue(__0);
                 var replaceAllImages = replaceValue != null && Convert.ToBoolean(replaceValue);
+                var replaceMetadataValue = __0?.GetType().GetProperty("ReplaceAllMetadata")?.GetValue(__0);
+                var replaceAllMetadata = replaceMetadataValue != null && Convert.ToBoolean(replaceMetadataValue);
                 onRefreshStarting?.Invoke(itemId, replaceAllImages);
                 var metadataModeValue = __0?.GetType().GetProperty("MetadataRefreshMode")?.GetValue(__0);
                 var metadataMode = Convert.ToString(metadataModeValue);
+                var imageMode = Convert.ToString(__0?.GetType().GetProperty("ImageRefreshMode")?.GetValue(__0));
                 logger?.Info(
-                    "ETK metadata refresh request observed for Item {0}: mode={1}.",
+                    "ETK refresh request observed for Item {0}: metadata={1}, image={2}, replaceMetadata={3}, replaceImages={4}.",
                     itemId,
-                    metadataMode ?? "<null>");
+                    metadataMode ?? "<null>",
+                    imageMode ?? "<null>",
+                    replaceAllMetadata,
+                    replaceAllImages);
+
+                // Emby 4.9's dialog always uses FullRefresh. Only "search missing
+                // metadata" clears ReplaceAllMetadata without requesting images.
                 var isMissingMetadataRefresh = string.Equals(
                     metadataMode,
-                    "ValidationOnly",
-                    StringComparison.OrdinalIgnoreCase);
-                if (!isMissingMetadataRefresh && metadataModeValue != null)
-                {
-                    try
-                    {
-                        isMissingMetadataRefresh = Convert.ToInt32(metadataModeValue) == 1;
-                    }
-                    catch (FormatException)
-                    {
-                        // Unknown named refresh modes are not the missing-metadata action.
-                    }
-                }
-                if (isMissingMetadataRefresh && !replaceAllImages)
+                    "FullRefresh",
+                    StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(
+                        imageMode,
+                        "FullRefresh",
+                        StringComparison.OrdinalIgnoreCase)
+                    && !replaceAllMetadata
+                    && !replaceAllImages;
+                if (isMissingMetadataRefresh)
                 {
                     onMissingMetadataRequested?.Invoke(itemId);
                 }
