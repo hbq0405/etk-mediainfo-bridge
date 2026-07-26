@@ -13,11 +13,13 @@ namespace ETKMediaInfoBridge
         private static MethodInfo targetMethod;
         private static Action<long, bool> onRefreshStarting;
         private static Action<long> onRefreshRequested;
+        private static Action<long> onMissingMetadataRequested;
         private static ILogger logger;
 
         public static void Install(
             Action<long, bool> startingCallback,
             Action<long> completedCallback,
+            Action<long> missingMetadataCallback,
             ILogger pluginLogger)
         {
             if (harmony != null)
@@ -42,6 +44,7 @@ namespace ETKMediaInfoBridge
 
             onRefreshStarting = startingCallback;
             onRefreshRequested = completedCallback;
+            onMissingMetadataRequested = missingMetadataCallback;
             logger = pluginLogger;
             harmony = new Harmony(HarmonyId);
             harmony.Patch(
@@ -62,6 +65,7 @@ namespace ETKMediaInfoBridge
             targetMethod = null;
             onRefreshStarting = null;
             onRefreshRequested = null;
+            onMissingMetadataRequested = null;
             logger = null;
         }
 
@@ -76,6 +80,12 @@ namespace ETKMediaInfoBridge
                 var replaceValue = __0?.GetType().GetProperty("ReplaceAllImages")?.GetValue(__0);
                 var replaceAllImages = replaceValue != null && Convert.ToBoolean(replaceValue);
                 onRefreshStarting?.Invoke(itemId, replaceAllImages);
+                var metadataMode = Convert.ToString(
+                    __0?.GetType().GetProperty("MetadataRefreshMode")?.GetValue(__0));
+                if (string.Equals(metadataMode, "Default", StringComparison.OrdinalIgnoreCase))
+                {
+                    onMissingMetadataRequested?.Invoke(itemId);
+                }
             }
             catch (Exception ex)
             {

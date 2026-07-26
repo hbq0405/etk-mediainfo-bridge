@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net.Http;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using MediaBrowser.Common.Configuration;
@@ -263,6 +264,7 @@ namespace ETKMediaInfoBridge
             RefreshItemInterceptor.Install(
                 this.OnRefreshStarting,
                 this.OnRefreshRequested,
+                this.OnMissingMetadataRefreshRequested,
                 this.logger);
             this.libraryManager.ItemAdded += this.OnItemAdded;
             this.libraryManager.ItemUpdated += this.OnItemUpdated;
@@ -449,6 +451,49 @@ namespace ETKMediaInfoBridge
                     "ETK Images could not synchronize the image policy cache before replacing images for Item {0}.",
                     itemId);
             }
+        }
+
+        private void OnMissingMetadataRefreshRequested(long itemId)
+        {
+            if (this.disposed)
+            {
+                return;
+            }
+            _ = Task.Run(async () =>
+            {
+                var origin = EtkMetadataClient.GetEtkOrigin(this.libraryManager);
+                if (string.IsNullOrWhiteSpace(origin))
+                {
+                    return;
+                }
+                try
+                {
+                    using (var response = await HttpClient.PostAsync(
+                        origin.TrimEnd('/') + "/api/emby/metadata/backfill",
+                        new StringContent("{}", Encoding.UTF8, "application/json")).ConfigureAwait(false))
+                    {
+                        if (response.IsSuccessStatusCode)
+                        {
+                            this.logger.Info(
+                                "ETK missing metadata backfill submitted for Emby refresh Item {0}.",
+                                itemId);
+                        }
+                        else
+                        {
+                            this.logger.Warn(
+                                "ETK missing metadata backfill rejected for Item {0}: HTTP {1}.",
+                                itemId,
+                                (int)response.StatusCode);
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    this.logger.ErrorException(
+                        "ETK missing metadata backfill request failed for Item " + itemId + ".",
+                        ex);
+                }
+            });
         }
 
         private void ScheduleRestoreTree(BaseItem item)
