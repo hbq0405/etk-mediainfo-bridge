@@ -469,8 +469,11 @@ namespace ETKMediaInfoBridge
                 try
                 {
                     using (var response = await HttpClient.PostAsync(
-                        origin.TrimEnd('/') + "/api/emby/metadata/backfill",
-                        new StringContent("{}", Encoding.UTF8, "application/json")).ConfigureAwait(false))
+                        origin.TrimEnd('/') + "/api/emby/metadata/backfill/item",
+                        new StringContent(
+                            "{\"emby_item_id\":" + itemId + "}",
+                            Encoding.UTF8,
+                            "application/json")).ConfigureAwait(false))
                     {
                         if (response.IsSuccessStatusCode)
                         {
