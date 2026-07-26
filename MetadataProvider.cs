@@ -583,28 +583,8 @@ namespace ETKMediaInfoBridge
         {
             lock (OriginLock)
             {
-                if (!string.IsNullOrEmpty(etkOrigin))
-                {
-                    return etkOrigin;
-                }
+                return etkOrigin;
             }
-            if (libraryManager == null)
-            {
-                return null;
-            }
-            foreach (var item in libraryManager.GetItemList(new InternalItemsQuery
-            {
-                Recursive = true,
-                IncludeItemTypes = new[] { "Movie", "Episode" }
-            }))
-            {
-                var mediaInfoUrl = ResolveMediaInfoUrl(item.Path);
-                if (RememberEtkOrigin(mediaInfoUrl))
-                {
-                    return etkOrigin;
-                }
-            }
-            return null;
         }
 
         private static bool RememberEtkOrigin(string url)

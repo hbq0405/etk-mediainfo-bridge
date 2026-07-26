@@ -68,7 +68,11 @@ namespace ETKMediaInfoBridge
             EtkMetadataClient.LoadEtkOrigin(this.applicationPaths.PluginConfigurationsPath);
             ManualImageEditInterceptor.Install(this.logger);
             ManualMetadataEditInterceptor.Install(this.logger);
-            this.DiscoverWebhookUrl();
+            var origin = EtkMetadataClient.GetEtkOrigin(this.libraryManager);
+            if (!string.IsNullOrEmpty(origin))
+            {
+                this.webhookUrl = origin.TrimEnd('/') + "/api/emby/events";
+            }
             this.libraryManager.ItemAdded += this.OnItemAdded;
             this.libraryManager.ItemUpdated += this.OnItemUpdated;
             this.sessionManager.PlaybackStart += this.OnPlaybackStart;
@@ -80,27 +84,6 @@ namespace ETKMediaInfoBridge
             this.logger.Info(
                 "ETK Emby event relay is active. Endpoint discovered: {0}.",
                 !string.IsNullOrEmpty(this.webhookUrl));
-        }
-
-        private void DiscoverWebhookUrl()
-        {
-            var origin = EtkMetadataClient.GetEtkOrigin(this.libraryManager);
-            if (!string.IsNullOrEmpty(origin))
-            {
-                this.webhookUrl = origin.TrimEnd('/') + "/api/emby/events";
-                return;
-            }
-            foreach (var item in this.libraryManager.GetItemList(new InternalItemsQuery
-            {
-                Recursive = true,
-                IncludeItemTypes = new[] { "Movie", "Episode" }
-            }))
-            {
-                if (this.TrySetWebhookUrl(item))
-                {
-                    return;
-                }
-            }
         }
 
         private bool TrySetWebhookUrl(BaseItem item)
