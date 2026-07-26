@@ -86,22 +86,22 @@ namespace ETKMediaInfoBridge
                     "ETK metadata refresh request observed for Item {0}: mode={1}.",
                     itemId,
                     metadataMode ?? "<null>");
-                var isDefaultMetadataRefresh = string.Equals(
+                var isMissingMetadataRefresh = string.Equals(
                     metadataMode,
-                    "Default",
+                    "ValidationOnly",
                     StringComparison.OrdinalIgnoreCase);
-                if (!isDefaultMetadataRefresh && metadataModeValue != null)
+                if (!isMissingMetadataRefresh && metadataModeValue != null)
                 {
                     try
                     {
-                        isDefaultMetadataRefresh = Convert.ToInt32(metadataModeValue) == 2;
+                        isMissingMetadataRefresh = Convert.ToInt32(metadataModeValue) == 1;
                     }
                     catch (FormatException)
                     {
                         // Unknown named refresh modes are not the missing-metadata action.
                     }
                 }
-                if (isDefaultMetadataRefresh)
+                if (isMissingMetadataRefresh && !replaceAllImages)
                 {
                     onMissingMetadataRequested?.Invoke(itemId);
                 }
