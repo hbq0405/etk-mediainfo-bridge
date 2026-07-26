@@ -68,6 +68,7 @@ namespace ETKMediaInfoBridge
         public int? production_year { get; set; }
         public float? community_rating { get; set; }
         public string official_rating { get; set; }
+        public string custom_rating { get; set; }
         public int? runtime_minutes { get; set; }
         public string[] genres { get; set; }
         public string[] tags { get; set; }
@@ -959,6 +960,7 @@ namespace ETKMediaInfoBridge
                 Overview = payload.overview,
                 Tagline = payload.tagline,
                 OfficialRating = payload.official_rating,
+                CustomRating = payload.custom_rating,
                 CommunityRating = payload.community_rating,
                 ProductionYear = payload.production_year,
                 IndexNumber = string.Equals(this.ItemType, "Episode", StringComparison.Ordinal)
