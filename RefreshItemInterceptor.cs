@@ -80,9 +80,28 @@ namespace ETKMediaInfoBridge
                 var replaceValue = __0?.GetType().GetProperty("ReplaceAllImages")?.GetValue(__0);
                 var replaceAllImages = replaceValue != null && Convert.ToBoolean(replaceValue);
                 onRefreshStarting?.Invoke(itemId, replaceAllImages);
-                var metadataMode = Convert.ToString(
-                    __0?.GetType().GetProperty("MetadataRefreshMode")?.GetValue(__0));
-                if (string.Equals(metadataMode, "Default", StringComparison.OrdinalIgnoreCase))
+                var metadataModeValue = __0?.GetType().GetProperty("MetadataRefreshMode")?.GetValue(__0);
+                var metadataMode = Convert.ToString(metadataModeValue);
+                logger?.Info(
+                    "ETK metadata refresh request observed for Item {0}: mode={1}.",
+                    itemId,
+                    metadataMode ?? "<null>");
+                var isDefaultMetadataRefresh = string.Equals(
+                    metadataMode,
+                    "Default",
+                    StringComparison.OrdinalIgnoreCase);
+                if (!isDefaultMetadataRefresh && metadataModeValue != null)
+                {
+                    try
+                    {
+                        isDefaultMetadataRefresh = Convert.ToInt32(metadataModeValue) == 2;
+                    }
+                    catch (FormatException)
+                    {
+                        // Unknown named refresh modes are not the missing-metadata action.
+                    }
+                }
+                if (isDefaultMetadataRefresh)
                 {
                     onMissingMetadataRequested?.Invoke(itemId);
                 }
