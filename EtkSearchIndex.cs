@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Concurrent;
-using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -151,7 +150,7 @@ namespace ETKMediaInfoBridge
             }
         }
 
-        public static async Task RebuildAsync(
+        public static async Task<bool> RebuildAsync(
             IJsonSerializer serializer,
             ILibraryManager libraryManager,
             ILogger logger,
@@ -160,7 +159,7 @@ namespace ETKMediaInfoBridge
             var origin = EtkMetadataClient.GetEtkOrigin(libraryManager);
             if (string.IsNullOrWhiteSpace(origin))
             {
-                return;
+                return false;
             }
             var token = Guid.NewGuid().ToString("N");
             if (!await PostAsync(serializer, origin, new EtkSearchIndexRequest
@@ -169,7 +168,7 @@ namespace ETKMediaInfoBridge
                 token = token
             }, cancellationToken).ConfigureAwait(false))
             {
-                return;
+                return false;
             }
 
             try
@@ -220,6 +219,7 @@ namespace ETKMediaInfoBridge
                     throw new InvalidOperationException("ETK search index completion failed.");
                 }
                 logger.Info("ETK Chinese search index rebuild completed.", Array.Empty<object>());
+                return true;
             }
             catch (Exception ex)
             {
@@ -229,6 +229,7 @@ namespace ETKMediaInfoBridge
                     token = token
                 }, CancellationToken.None).ConfigureAwait(false);
                 logger.Warn("ETK Chinese search index rebuild failed: {0}", ex.Message);
+                return false;
             }
         }
 
@@ -384,30 +385,13 @@ namespace ETKMediaInfoBridge
                         prefix: new HarmonyMethod(typeof(EtkSearchInterceptor), nameof(BeforeGetItemList)));
                     PatchedMethods.Add(method);
                 }
-                var suggestionsServiceType = AccessTools.TypeByName("Emby.Api.SuggestionsService");
-                var suggestedItemsType = AccessTools.TypeByName("Emby.Api.GetSuggestedItems");
-                var suggestionsMethod = suggestionsServiceType?.GetMethods(
-                        System.Reflection.BindingFlags.Instance
-                        | System.Reflection.BindingFlags.Public
-                        | System.Reflection.BindingFlags.NonPublic)
-                    .FirstOrDefault(method =>
-                        method.Name == "Get"
-                        && method.GetParameters().Length == 1
-                        && method.GetParameters()[0].ParameterType == suggestedItemsType);
-                if (suggestionsMethod != null)
-                {
-                    harmony.Patch(
-                        suggestionsMethod,
-                        postfix: new HarmonyMethod(typeof(EtkSearchInterceptor), nameof(AfterGetSuggestions)));
-                    PatchedMethods.Add(suggestionsMethod);
-                    pluginLogger.Info("ETK search recommendation suppression is active.", Array.Empty<object>());
-                }
                 if (PatchedMethods.Count == 0)
                 {
                     harmony = null;
                     pluginLogger.Warn("ETK Chinese search hook was not installed: compatible query methods were not found.");
                     return;
                 }
+                pluginLogger.Info("ETK search recommendation suppression is active.", Array.Empty<object>());
                 pluginLogger.Info("ETK Chinese search hook is active.", Array.Empty<object>());
             }
         }
@@ -441,6 +425,10 @@ namespace ETKMediaInfoBridge
                 var query = __0?.SearchTerm;
                 if (string.IsNullOrWhiteSpace(query))
                 {
+                    if (IsSearchRecommendationQuery(__0))
+                    {
+                        __0.ItemIds = new[] { long.MaxValue };
+                    }
                     return;
                 }
                 if (StrmAssistantSearchCompatibility.IsEnabled(
@@ -479,7 +467,16 @@ namespace ETKMediaInfoBridge
                 {
                     return;
                 }
-                var ids = (response.items ?? Array.Empty<EtkSearchResult>())
+                var responseItems = response.items ?? Array.Empty<EtkSearchResult>();
+                if ((itemTypes == null || itemTypes.Length == 0) && responseItems.Length > 0)
+                {
+                    itemTypes = responseItems
+                        .Select(item => item.type)
+                        .Where(type => !string.IsNullOrWhiteSpace(type))
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .ToArray();
+                }
+                var ids = responseItems
                         .Select(item => item.id)
                         .Where(id => id > 0)
                         .Distinct()
@@ -499,6 +496,38 @@ namespace ETKMediaInfoBridge
             }
         }
 
+        private static bool IsSearchRecommendationQuery(InternalItemsQuery query)
+        {
+            if (query == null
+                || !string.Equals(query.QueryName, "ItemsService.GetItems", StringComparison.Ordinal)
+                || !query.Recursive
+                || query.Limit != 20
+                || query.EnableTotalRecordCount)
+            {
+                return false;
+            }
+            var itemTypes = new HashSet<string>(
+                query.IncludeItemTypes ?? Array.Empty<string>(),
+                StringComparer.OrdinalIgnoreCase);
+            if (itemTypes.Count != 3
+                || !itemTypes.Contains("Movie")
+                || !itemTypes.Contains("Series")
+                || !itemTypes.Contains("MusicArtist"))
+            {
+                return false;
+            }
+            var orderBy = query.OrderBy ?? Array.Empty<(string, MediaBrowser.Model.Entities.SortOrder)>();
+            return orderBy.Length == 2
+                && orderBy.Any(value => string.Equals(
+                    value.Item1,
+                    "IsFavoriteOrLiked",
+                    StringComparison.OrdinalIgnoreCase))
+                && orderBy.Any(value => string.Equals(
+                    value.Item1,
+                    "Random",
+                    StringComparison.OrdinalIgnoreCase));
+        }
+
         private static string[] IncludeBoxSetsInCombinedSearch(string[] itemTypes)
         {
             if (itemTypes == null
@@ -512,50 +541,6 @@ namespace ETKMediaInfoBridge
             return itemTypes.Concat(new[] { "BoxSet" }).ToArray();
         }
 
-        private static void AfterGetSuggestions(ref object __result)
-        {
-            try
-            {
-                if (__result == null)
-                {
-                    return;
-                }
-                if (__result is IList list && !list.IsReadOnly && !list.IsFixedSize)
-                {
-                    list.Clear();
-                    return;
-                }
-                ClearResultItems(__result, "Items");
-                var totalProperty = __result.GetType().GetProperty("TotalRecordCount");
-                if (totalProperty?.CanWrite == true)
-                {
-                    totalProperty.SetValue(__result, Convert.ChangeType(0, totalProperty.PropertyType));
-                }
-            }
-            catch (Exception ex)
-            {
-                logger?.Debug("ETK search recommendation suppression skipped: {0}", ex.Message);
-            }
-        }
-
-        private static void ClearResultItems(object result, string propertyName)
-        {
-            var property = result.GetType().GetProperty(propertyName);
-            if (property == null)
-            {
-                return;
-            }
-            var value = property.GetValue(result);
-            if (value is IList list && !list.IsReadOnly && !list.IsFixedSize)
-            {
-                list.Clear();
-                return;
-            }
-            if (value is Array array && property.CanWrite)
-            {
-                property.SetValue(result, Array.CreateInstance(array.GetType().GetElementType(), 0));
-            }
-        }
     }
 
     public sealed class EtkSearchIndexEntryPoint : IServerEntryPoint, IDisposable
@@ -595,16 +580,20 @@ namespace ETKMediaInfoBridge
 
         private async Task RebuildWhenReadyAsync()
         {
-            for (var attempt = 0; attempt < 12 && !this.disposed; attempt++)
+            while (!this.disposed)
             {
                 if (!string.IsNullOrWhiteSpace(EtkMetadataClient.GetEtkOrigin(this.libraryManager)))
                 {
-                    await EtkSearchIndexClient.RebuildAsync(
+                    if (await EtkSearchIndexClient.RebuildAsync(
                         this.serializer,
                         this.libraryManager,
                         this.logger,
-                        CancellationToken.None).ConfigureAwait(false);
-                    return;
+                        CancellationToken.None).ConfigureAwait(false))
+                    {
+                        return;
+                    }
+                    await Task.Delay(TimeSpan.FromSeconds(30)).ConfigureAwait(false);
+                    continue;
                 }
                 await Task.Delay(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
             }
