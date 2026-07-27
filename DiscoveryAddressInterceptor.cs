@@ -209,15 +209,7 @@ namespace ETKMediaInfoBridge
                 {
                     return;
                 }
-                var addresses = result.LocalAddresses ?? Array.Empty<string>();
-                if (addresses.Length == 0)
-                {
-                    result.LocalAddresses = new[] { configured };
-                    return;
-                }
-                addresses = (string[])addresses.Clone();
-                addresses[0] = configured;
-                result.LocalAddresses = addresses;
+                result.LocalAddresses = new[] { configured };
             }
             catch (Exception ex)
             {
