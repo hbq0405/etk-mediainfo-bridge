@@ -7,6 +7,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using MediaBrowser.Common.Configuration;
+using MediaBrowser.Controller;
 using MediaBrowser.Controller.Collections;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Movies;
@@ -227,6 +228,7 @@ namespace ETKMediaInfoBridge
         private readonly IProviderManager providerManager;
         private readonly IDirectoryService directoryService;
         private readonly ILogger logger;
+        private readonly IServerApplicationHost applicationHost;
         private readonly ConcurrentDictionary<long, CancellationTokenSource> pending =
             new ConcurrentDictionary<long, CancellationTokenSource>();
         private readonly ConcurrentDictionary<long, ReplaceImageState> replaceImageStates =
@@ -245,6 +247,7 @@ namespace ETKMediaInfoBridge
             ITaskManager taskManager,
             IProviderManager providerManager,
             IFileSystem fileSystem,
+            IServerApplicationHost applicationHost,
             ILogger logger)
         {
             this.libraryManager = libraryManager;
@@ -255,6 +258,7 @@ namespace ETKMediaInfoBridge
             this.taskManager = taskManager;
             this.providerManager = providerManager;
             this.directoryService = new DirectoryService(fileSystem);
+            this.applicationHost = applicationHost;
             this.logger = logger;
         }
 
@@ -262,6 +266,10 @@ namespace ETKMediaInfoBridge
         {
             Plugin.EnsureDependenciesLoaded();
             EtkMetadataClient.LoadEtkOrigin(this.applicationPaths.PluginConfigurationsPath);
+            DiscoveryAddressInterceptor.Install(
+                this.applicationHost,
+                this.applicationPaths.PluginConfigurationsPath,
+                this.logger);
             DeepDeleteInterceptor.Install(this.libraryManager, this.jsonSerializer, this.logger);
             ManualImageSearchInterceptor.Install(this.logger);
             RefreshItemInterceptor.Install(
@@ -1054,6 +1062,7 @@ namespace ETKMediaInfoBridge
             }
             this.disposed = true;
             RefreshItemInterceptor.Uninstall();
+            DiscoveryAddressInterceptor.Uninstall();
             ManualImageSearchInterceptor.Uninstall();
             DeepDeleteInterceptor.Uninstall();
             this.libraryManager.ItemAdded -= this.OnItemAdded;

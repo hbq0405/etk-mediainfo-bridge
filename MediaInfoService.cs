@@ -324,6 +324,18 @@ namespace ETKMediaInfoBridge
         public bool Configured { get; set; }
     }
 
+    [Route("/ETKMediaInfo/DiscoveryUrl", "POST", Summary = "Configures the Emby discovery URL")]
+    [Authenticated(Roles = "Admin")]
+    public sealed class ConfigureEtkDiscoveryUrl : IReturn<ConfigureEtkDiscoveryUrlResult>
+    {
+        public string Url { get; set; }
+    }
+
+    public sealed class ConfigureEtkDiscoveryUrlResult
+    {
+        public bool Configured { get; set; }
+    }
+
     public sealed class MediaInfoService : IService
     {
         private readonly ILibraryManager libraryManager;
@@ -388,6 +400,16 @@ namespace ETKMediaInfoBridge
             return new ConfigureEtkOriginResult
             {
                 Configured = EtkMetadataClient.ConfigureEtkOrigin(
+                    request?.Url,
+                    this.applicationPaths.PluginConfigurationsPath)
+            };
+        }
+
+        public ConfigureEtkDiscoveryUrlResult Post(ConfigureEtkDiscoveryUrl request)
+        {
+            return new ConfigureEtkDiscoveryUrlResult
+            {
+                Configured = DiscoveryAddressInterceptor.Configure(
                     request?.Url,
                     this.applicationPaths.PluginConfigurationsPath)
             };
