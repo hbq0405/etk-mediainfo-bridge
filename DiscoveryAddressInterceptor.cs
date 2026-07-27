@@ -19,8 +19,8 @@ namespace ETKMediaInfoBridge
         private static readonly object SyncRoot = new object();
         private static Harmony harmony;
         private static MethodInfo udpSendMethod;
-        private static MethodInfo publicInfoMethod;
-        private static MethodInfo systemInfoMethod;
+        private static MethodInfo[] publicInfoMethods = Array.Empty<MethodInfo>();
+        private static MethodInfo[] systemInfoMethods = Array.Empty<MethodInfo>();
         private static string discoveryUrl;
         private static ILogger logger;
 
@@ -78,9 +78,9 @@ namespace ETKMediaInfoBridge
                 null);
 
             var hostType = applicationHost?.GetType();
-            publicInfoMethod = FindHostMethod(hostType, "GetPublicSystemInfo", typeof(Task<PublicSystemInfo>));
-            systemInfoMethod = FindHostMethod(hostType, "GetSystemInfo", typeof(Task<SystemInfo>));
-            if (udpSendMethod == null || (publicInfoMethod == null && systemInfoMethod == null))
+            publicInfoMethods = FindHostMethods(hostType, "GetPublicSystemInfo", typeof(Task<PublicSystemInfo>));
+            systemInfoMethods = FindHostMethods(hostType, "GetSystemInfo", typeof(Task<SystemInfo>));
+            if (udpSendMethod == null || (publicInfoMethods.Length == 0 && systemInfoMethods.Length == 0))
             {
                 pluginLogger.Warn("ETK discovery address hook was not installed: compatible Emby methods were not found.");
                 return;
@@ -90,19 +90,22 @@ namespace ETKMediaInfoBridge
             harmony.Patch(
                 udpSendMethod,
                 prefix: new HarmonyMethod(typeof(DiscoveryAddressInterceptor), nameof(BeforeUdpSend)));
-            if (publicInfoMethod != null)
+            foreach (var method in publicInfoMethods)
             {
                 harmony.Patch(
-                    publicInfoMethod,
+                    method,
                     postfix: new HarmonyMethod(typeof(DiscoveryAddressInterceptor), nameof(AfterPublicInfo)));
             }
-            if (systemInfoMethod != null)
+            foreach (var method in systemInfoMethods)
             {
                 harmony.Patch(
-                    systemInfoMethod,
+                    method,
                     postfix: new HarmonyMethod(typeof(DiscoveryAddressInterceptor), nameof(AfterSystemInfo)));
             }
-            pluginLogger.Info("ETK discovery address hook is active.", Array.Empty<object>());
+            pluginLogger.Info(
+                "ETK discovery address hook is active ({0} public, {1} system methods).",
+                publicInfoMethods.Length,
+                systemInfoMethods.Length);
         }
 
         public static void Uninstall()
@@ -114,16 +117,19 @@ namespace ETKMediaInfoBridge
             harmony.UnpatchAll(HarmonyId);
             harmony = null;
             udpSendMethod = null;
-            publicInfoMethod = null;
-            systemInfoMethod = null;
+            publicInfoMethods = Array.Empty<MethodInfo>();
+            systemInfoMethods = Array.Empty<MethodInfo>();
             logger = null;
         }
 
-        private static MethodInfo FindHostMethod(Type hostType, string name, Type returnType)
+        private static MethodInfo[] FindHostMethods(Type hostType, string name, Type returnType)
         {
             return hostType?.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
-                .FirstOrDefault(method => method.Name == name && method.ReturnType == returnType)
-                ?.GetBaseDefinition();
+                .Where(method => method.Name == name && method.ReturnType == returnType)
+                .Select(method => method.GetBaseDefinition())
+                .Distinct()
+                .ToArray()
+                ?? Array.Empty<MethodInfo>();
         }
 
         private static void Load(string configurationDirectory)
