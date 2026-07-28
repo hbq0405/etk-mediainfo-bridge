@@ -18,6 +18,7 @@ using MediaBrowser.Model.Configuration;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.Providers;
 using MediaBrowser.Model.Serialization;
+using MediaBrowser.Model.Logging;
 
 namespace ETKMediaInfoBridge
 {
@@ -453,7 +454,8 @@ namespace ETKMediaInfoBridge
             string tmdbId,
             IEnumerable<EtkImageRule> rules,
             CancellationToken cancellationToken,
-            ILibraryManager libraryManager)
+            ILibraryManager libraryManager,
+            ILogger logger = null)
         {
             var result = await SyncImagesAsync(
                 serializer,
@@ -465,7 +467,8 @@ namespace ETKMediaInfoBridge
                 rules,
                 true,
                 cancellationToken,
-                libraryManager).ConfigureAwait(false);
+                libraryManager,
+                logger).ConfigureAwait(false);
             if (result != null)
             {
                 Cache.Clear();
@@ -484,11 +487,13 @@ namespace ETKMediaInfoBridge
             IEnumerable<EtkImageRule> rules,
             bool force,
             CancellationToken cancellationToken,
-            ILibraryManager libraryManager)
+            ILibraryManager libraryManager,
+            ILogger logger = null)
         {
             var origin = ResolveEtkOrigin(libraryManager);
             if (string.IsNullOrEmpty(origin))
             {
+                logger?.Warn("ETK Images cannot synchronize image policy: no ETK service address is configured.");
                 return null;
             }
             var url = BuildImageApiUrl(
@@ -504,28 +509,52 @@ namespace ETKMediaInfoBridge
                 force = force,
                 rules = EtkImagePolicy.ToSyncRules(rules)
             };
-            using (var content = new StringContent(
-                serializer.SerializeToString(payload),
-                Encoding.UTF8,
-                "application/json"))
-            using (var response = await ImageRefreshHttpClient.PostAsync(
-                url,
-                content,
-                cancellationToken).ConfigureAwait(false))
+            try
             {
-                if (!response.IsSuccessStatusCode)
+                using (var content = new StringContent(
+                    serializer.SerializeToString(payload),
+                    Encoding.UTF8,
+                    "application/json"))
+                using (var response = await ImageRefreshHttpClient.PostAsync(
+                    url,
+                    content,
+                    cancellationToken).ConfigureAwait(false))
                 {
-                    return null;
+                    var json = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        logger?.Warn(
+                            "ETK Images image policy synchronization failed: {0} returned HTTP {1}. Response: {2}",
+                            origin,
+                            (int)response.StatusCode,
+                            AbbreviateForLog(json));
+                        return null;
+                    }
+                    var result = serializer.DeserializeFromString<EtkImageSyncResponse>(json);
+                    if (result == null)
+                    {
+                        logger?.Warn(
+                            "ETK Images image policy synchronization failed: {0} returned an invalid response.",
+                            origin);
+                        return null;
+                    }
+                    RewriteCandidateUrls(origin, result.images);
+                    return result;
                 }
-                var json = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
-                var result = serializer.DeserializeFromString<EtkImageSyncResponse>(json);
-                if (result == null)
-                {
-                    return null;
-                }
-                RewriteCandidateUrls(origin, result.images);
-                return result;
             }
+            catch (Exception ex)
+            {
+                logger?.ErrorException(
+                    string.Format("ETK Images image policy request to {0} failed.", origin),
+                    ex);
+                return null;
+            }
+        }
+
+        private static string AbbreviateForLog(string value)
+        {
+            var text = Regex.Replace(value ?? string.Empty, @"\s+", " ").Trim();
+            return text.Length <= 500 ? text : text.Substring(0, 500) + "...";
         }
 
         public static async Task<EtkRemoteImageCandidate[]> SearchImagesAsync(

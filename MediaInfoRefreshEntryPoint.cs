@@ -421,7 +421,8 @@ namespace ETKMediaInfoBridge
                 tmdbId,
                 imageRules,
                 CancellationToken.None,
-                this.libraryManager).GetAwaiter().GetResult();
+                this.libraryManager,
+                this.logger).GetAwaiter().GetResult();
             if (refreshed)
             {
                 this.replaceImageStates[itemId] = new ReplaceImageState
@@ -894,7 +895,8 @@ namespace ETKMediaInfoBridge
                 rules,
                 refreshPolicy,
                 cancellationToken,
-                this.libraryManager).ConfigureAwait(false);
+                this.libraryManager,
+                this.logger).ConfigureAwait(false);
             if (rules.Length == 0)
             {
                 return;
