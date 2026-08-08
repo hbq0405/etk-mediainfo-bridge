@@ -556,6 +556,24 @@ namespace ETKMediaInfoBridge
                 return;
             }
             var itemType = item.GetType().Name;
+            if (string.Equals(itemType, "CollectionFolder", StringComparison.Ordinal))
+            {
+                var children = this.libraryManager.GetItemList(new InternalItemsQuery
+                {
+                    Parent = item,
+                    Recursive = true,
+                    IncludeItemTypes = new[] { "Movie", "Series" }
+                }).ToList();
+                this.logger.Info(
+                    "ETK metadata cache restore expanded CollectionFolder {0} to {1} media roots.",
+                    item.InternalId,
+                    children.Count);
+                foreach (var child in children)
+                {
+                    this.ScheduleRestoreTree(child);
+                }
+                return;
+            }
             if (string.Equals(itemType, "Series", StringComparison.Ordinal)
                 || string.Equals(itemType, "Season", StringComparison.Ordinal))
             {

@@ -26,8 +26,6 @@ ETK MediaInfo Bridge 是适用于 Emby 4.9.x 的媒体信息桥接插件。它�
 - 直接监听 Emby 播放、用户数据、权限、合集和手动元数据/图片编辑事件并上报 ETK，无需配置 Emby Webhook。
 - 拦截用户主动删除，在删除成功后把电影多版本、整季或整剧的完整 115 PickCode 交给 ETK 联动清理；媒体库扫描移除不会触发。
 - 在 Emby 计划任务中提供“更新 ETK MediaInfo Bridge”，支持一键更新和每日定时检查。
-- 在 Emby 计划任务中提供“补齐 ETK 媒体元数据”，扫描在库 STRM 并触发 ETK 回填早期入库记录的新增字段。
-- 在 Emby 计划任务中提供“片头片尾提取”，触发 ETK 查漏补齐剧集片头片尾章节。
 
 ## 工作方式
 
@@ -51,7 +49,7 @@ ETK MediaInfo Bridge 是适用于 Emby 4.9.x 的媒体信息桥接插件。它�
 或调整其默认的每日检查时间。发现新版本后会通过已注册的 ETK 地址代理下载并替换 DLL，Emby 无需直连 GitHub；重启 Emby 后生效，旧 DLL 会保留为
 `ETKMediaInfoBridge.dll.bak`。
 
-Emby 必须能够访问 STRM 文件中保存的 ETK 地址，ETK 需正确配置 Emby 管理员 API 信息才能校验片头回写。对应后端接口已包含在 ETK `dev` 分支中。
+Emby 必须能够访问 STRM 文件中保存的 ETK 地址，ETK 需正确配置 Emby 管理员 API 信息才能校验片头回写。片头片尾批量提取由 ETK 任务中心负责。对应后端接口已包含在 ETK `dev` 分支中。
 
 ## API
 
