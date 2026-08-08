@@ -120,13 +120,20 @@ namespace ETKMediaInfoBridge
             PatchedMethods.Add(method);
         }
 
-        private static void BeforeBaseItemImageEdit(BaseItem __0)
+        private static void BeforeBaseItemImageEdit(object __instance, BaseItem __0)
         {
-            Mark(__0?.InternalId ?? 0);
+            if (IsUserRequest(__instance))
+            {
+                Mark(__0?.InternalId ?? 0);
+            }
         }
 
-        private static void BeforeImageRequest(object __0)
+        private static void BeforeImageRequest(object __instance, object __0)
         {
+            if (!IsUserRequest(__instance))
+            {
+                return;
+            }
             Mark(
                 RequestItemId(__0),
                 Convert.ToString(GetPropertyValue(__0, "Type")),
@@ -135,10 +142,7 @@ namespace ETKMediaInfoBridge
 
         private static void BeforeRemoteImageRequest(object __instance, object __0)
         {
-            var request = GetPropertyValue(__instance, "Request");
-            var userAgent = Convert.ToString(GetPropertyValue(request, "UserAgent")) ?? string.Empty;
-            if (userAgent.IndexOf("python-requests", StringComparison.OrdinalIgnoreCase) >= 0
-                || userAgent.IndexOf("ETK", StringComparison.OrdinalIgnoreCase) >= 0)
+            if (!IsUserRequest(__instance))
             {
                 return;
             }
@@ -146,6 +150,19 @@ namespace ETKMediaInfoBridge
                 RequestItemId(__0),
                 Convert.ToString(GetPropertyValue(__0, "Type")),
                 Convert.ToString(GetPropertyValue(__0, "ImageUrl")));
+        }
+
+        private static bool IsUserRequest(object service)
+        {
+            var request = GetPropertyValue(service, "Request");
+            if (request == null)
+            {
+                return false;
+            }
+            var userAgent = Convert.ToString(GetPropertyValue(request, "UserAgent")) ?? string.Empty;
+            return userAgent.IndexOf("python-requests", StringComparison.OrdinalIgnoreCase) < 0
+                && userAgent.IndexOf("python-urllib", StringComparison.OrdinalIgnoreCase) < 0
+                && userAgent.IndexOf("ETK", StringComparison.OrdinalIgnoreCase) < 0;
         }
 
         private static long RequestItemId(object request)

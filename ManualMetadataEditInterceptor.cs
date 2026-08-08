@@ -75,6 +75,7 @@ namespace ETKMediaInfoBridge
                 var request = GetPropertyValue(__instance, "Request");
                 var userAgent = Convert.ToString(GetPropertyValue(request, "UserAgent")) ?? string.Empty;
                 if (userAgent.IndexOf("python-requests", StringComparison.OrdinalIgnoreCase) >= 0
+                    || userAgent.IndexOf("python-urllib", StringComparison.OrdinalIgnoreCase) >= 0
                     || userAgent.IndexOf("ETK", StringComparison.OrdinalIgnoreCase) >= 0)
                 {
                     return;

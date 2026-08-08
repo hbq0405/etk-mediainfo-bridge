@@ -316,6 +316,7 @@ namespace ETKMediaInfoBridge
             var payload = extra ?? new Dictionary<string, object>();
             payload["Event"] = eventName;
             payload["_etk_source"] = "ETKMediaInfoBridge";
+            payload["_etk_event_id"] = Guid.NewGuid().ToString("N");
             if (item != null)
             {
                 payload["Item"] = ItemPayload(item);

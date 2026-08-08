@@ -28,6 +28,8 @@ namespace ETKMediaInfoBridge
     {
         private static readonly ConcurrentDictionary<long, DateTime> SuppressedUntil =
             new ConcurrentDictionary<long, DateTime>();
+        private static readonly ConcurrentDictionary<long, DateTime> SuppressedRefreshUntil =
+            new ConcurrentDictionary<long, DateTime>();
 
         public static void Suppress(long itemId)
         {
@@ -46,6 +48,20 @@ namespace ETKMediaInfoBridge
             }
             SuppressedUntil.TryRemove(itemId, out _);
             return false;
+        }
+
+        public static void SuppressRefresh(long itemId)
+        {
+            SuppressedRefreshUntil[itemId] = DateTime.UtcNow.AddSeconds(30);
+        }
+
+        public static bool TryConsumeRefreshSuppression(long itemId)
+        {
+            if (!SuppressedRefreshUntil.TryRemove(itemId, out var until))
+            {
+                return false;
+            }
+            return until > DateTime.UtcNow;
         }
     }
 
@@ -233,9 +249,6 @@ namespace ETKMediaInfoBridge
             new ConcurrentDictionary<long, CancellationTokenSource>();
         private readonly ConcurrentDictionary<long, ReplaceImageState> replaceImageStates =
             new ConcurrentDictionary<long, ReplaceImageState>();
-        private readonly object missingMetadataLock = new object();
-        private readonly HashSet<long> pendingMissingMetadataItemIds = new HashSet<long>();
-        private CancellationTokenSource missingMetadataBatchCancellation;
         private bool disposed;
 
         public MediaInfoRefreshEntryPoint(
@@ -275,7 +288,7 @@ namespace ETKMediaInfoBridge
             RefreshItemInterceptor.Install(
                 this.OnRefreshStarting,
                 this.OnRefreshRequested,
-                this.OnMissingMetadataRefreshRequested,
+                this.OnRefreshActionRequested,
                 this.logger);
             this.libraryManager.ItemAdded += this.OnItemAdded;
             this.libraryManager.ItemUpdated += this.OnItemUpdated;
@@ -465,120 +478,74 @@ namespace ETKMediaInfoBridge
             }
         }
 
-        private void OnMissingMetadataRefreshRequested(long itemId)
+        private void OnRefreshActionRequested(RefreshRequestInfo request)
         {
-            if (this.disposed)
+            if (this.disposed || request == null)
             {
                 return;
             }
-            CancellationTokenSource cancellation;
-            lock (this.missingMetadataLock)
+            _ = Task.Run(() => this.NotifyRefreshActionAsync(request));
+        }
+
+        private async Task NotifyRefreshActionAsync(RefreshRequestInfo request)
+        {
+            var item = this.libraryManager.GetItemById(request.ItemId);
+            if (item == null)
             {
-                this.pendingMissingMetadataItemIds.Add(itemId);
-                if (this.missingMetadataBatchCancellation != null)
-                {
-                    this.missingMetadataBatchCancellation.Cancel();
-                    this.missingMetadataBatchCancellation.Dispose();
-                }
-                cancellation = new CancellationTokenSource();
-                this.missingMetadataBatchCancellation = cancellation;
+                return;
             }
-            _ = Task.Run(async () =>
+            var origin = EtkMetadataClient.GetEtkOrigin(this.libraryManager);
+            if (string.IsNullOrWhiteSpace(origin))
             {
-                try
-                {
-                    await Task.Delay(600, cancellation.Token).ConfigureAwait(false);
-                }
-                catch (OperationCanceledException)
-                {
-                    return;
-                }
-                long[] itemIds;
-                lock (this.missingMetadataLock)
-                {
-                    if (this.disposed || !ReferenceEquals(this.missingMetadataBatchCancellation, cancellation))
-                    {
-                        return;
-                    }
-                    itemIds = this.pendingMissingMetadataItemIds.ToArray();
-                    this.pendingMissingMetadataItemIds.Clear();
-                    this.missingMetadataBatchCancellation = null;
-                }
-                if (itemIds.Length == 0)
-                {
-                    return;
-                }
-                var libraryIds = itemIds
-                    .Where(this.IsLibraryRefreshItem)
-                    .ToArray();
-                var selectedItemIds = itemIds
-                    .Except(libraryIds)
-                    .ToArray();
-                var origin = EtkMetadataClient.GetEtkOrigin(this.libraryManager);
-                if (string.IsNullOrWhiteSpace(origin))
-                {
-                    return;
-                }
-                try
-                {
-                    if (selectedItemIds.Length > 0)
-                    {
-                        await this.SubmitMissingMetadataBackfillAsync(
-                            origin.TrimEnd('/') + "/api/emby/metadata/backfill/items",
-                            "{\"emby_item_ids\":[" + string.Join(",", selectedItemIds) + "]}",
-                            selectedItemIds.Length + " Emby refresh items").ConfigureAwait(false);
-                    }
-                    foreach (var libraryId in libraryIds)
-                    {
-                        await this.SubmitMissingMetadataBackfillAsync(
-                            origin.TrimEnd('/') + "/api/emby/metadata/backfill/library",
-                            "{\"emby_library_id\":\"" + libraryId
-                                + "\",\"refresh_mode\":\"missing_metadata\"}",
-                            "Emby library " + libraryId).ConfigureAwait(false);
-                    }
-                }
-                catch (Exception ex)
-                {
-                    this.logger.ErrorException(
-                        "ETK missing metadata backfill request failed.",
-                        ex);
-                }
-                finally
-                {
-                    cancellation.Dispose();
-                }
-            });
-        }
-
-        private bool IsLibraryRefreshItem(long itemId)
-        {
-            var item = this.libraryManager.GetItemById(itemId);
-            return item != null
-                && string.Equals(item.GetType().Name, "CollectionFolder", StringComparison.Ordinal);
-        }
-
-        private async Task SubmitMissingMetadataBackfillAsync(
-            string url,
-            string payload,
-            string scope)
-        {
-            using (var response = await HttpClient.PostAsync(
-                url,
-                new StringContent(payload, Encoding.UTF8, "application/json")).ConfigureAwait(false))
+                return;
+            }
+            var payload = new Dictionary<string, object>
             {
-                if (response.IsSuccessStatusCode)
+                ["Event"] = "refresh.request",
+                ["_etk_source"] = "ETKMediaInfoBridge",
+                ["_etk_event_id"] = Guid.NewGuid().ToString("N"),
+                ["Item"] = new Dictionary<string, object>
                 {
-                    this.logger.Info(
-                        "ETK missing metadata backfill submitted for {0}.",
-                        scope);
-                }
-                else
+                    ["Id"] = item.InternalId.ToString(),
+                    ["Type"] = item.GetType().Name,
+                    ["Name"] = item.Name,
+                    ["Path"] = item.Path
+                },
+                ["Refresh"] = new Dictionary<string, object>
                 {
-                    this.logger.Warn(
-                        "ETK missing metadata backfill rejected for {0}: HTTP {1}.",
-                        scope,
-                        (int)response.StatusCode);
+                    ["Action"] = request.Action,
+                    ["Recursive"] = request.Recursive,
+                    ["MetadataRefreshMode"] = request.MetadataRefreshMode,
+                    ["ImageRefreshMode"] = request.ImageRefreshMode,
+                    ["ReplaceAllMetadata"] = request.ReplaceAllMetadata,
+                    ["ReplaceAllImages"] = request.ReplaceAllImages
                 }
+            };
+            try
+            {
+                using (var content = new StringContent(
+                    this.jsonSerializer.SerializeToString(payload),
+                    Encoding.UTF8,
+                    "application/json"))
+                using (var response = await HttpClient.PostAsync(
+                    origin.TrimEnd('/') + "/api/emby/events",
+                    content).ConfigureAwait(false))
+                {
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        this.logger.Warn(
+                            "ETK refresh event returned HTTP {0} for Item {1}.",
+                            (int)response.StatusCode,
+                            request.ItemId);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                this.logger.Debug(
+                    "ETK refresh event failed for Item {0}: {1}",
+                    request.ItemId,
+                    ex.Message);
             }
         }
 
@@ -1081,12 +1048,6 @@ namespace ETKMediaInfoBridge
                 }
             }
             this.pending.Clear();
-            lock (this.missingMetadataLock)
-            {
-                this.missingMetadataBatchCancellation?.Cancel();
-                this.missingMetadataBatchCancellation = null;
-                this.pendingMissingMetadataItemIds.Clear();
-            }
             this.replaceImageStates.Clear();
         }
     }

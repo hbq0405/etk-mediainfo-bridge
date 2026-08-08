@@ -336,6 +336,21 @@ namespace ETKMediaInfoBridge
         public bool Configured { get; set; }
     }
 
+    [Route("/Items/{Id}/ETKMediaInfo/SuppressRefresh", "POST", Summary = "Marks the next refresh as ETK initiated")]
+    [Authenticated(Roles = "Admin")]
+    public sealed class SuppressEtkRefresh : IReturn<SuppressEtkRefreshResult>
+    {
+        [ApiMember(Name = "Id", IsRequired = true, DataType = "long", ParameterType = "path", Verb = "POST")]
+        public long Id { get; set; }
+    }
+
+    public sealed class SuppressEtkRefreshResult
+    {
+        public long ItemId { get; set; }
+
+        public bool Suppressed { get; set; }
+    }
+
     public sealed class MediaInfoService : IService
     {
         private readonly ILibraryManager libraryManager;
@@ -412,6 +427,20 @@ namespace ETKMediaInfoBridge
                 Configured = DiscoveryAddressInterceptor.Configure(
                     request?.Url,
                     this.applicationPaths.PluginConfigurationsPath)
+            };
+        }
+
+        public SuppressEtkRefreshResult Post(SuppressEtkRefresh request)
+        {
+            if (request == null || request.Id <= 0 || this.libraryManager.GetItemById(request.Id) == null)
+            {
+                throw new ArgumentException("Emby item was not found.", nameof(request));
+            }
+            MediaInfoRefreshGuard.SuppressRefresh(request.Id);
+            return new SuppressEtkRefreshResult
+            {
+                ItemId = request.Id,
+                Suppressed = true
             };
         }
     }

@@ -6,6 +6,23 @@ using MediaBrowser.Model.Logging;
 
 namespace ETKMediaInfoBridge
 {
+    internal sealed class RefreshRequestInfo
+    {
+        public long ItemId { get; set; }
+
+        public bool Recursive { get; set; }
+
+        public string MetadataRefreshMode { get; set; }
+
+        public string ImageRefreshMode { get; set; }
+
+        public bool ReplaceAllMetadata { get; set; }
+
+        public bool ReplaceAllImages { get; set; }
+
+        public string Action { get; set; }
+    }
+
     internal static class RefreshItemInterceptor
     {
         private const string HarmonyId = "ETKMediaInfoBridge.RefreshItem";
@@ -13,13 +30,13 @@ namespace ETKMediaInfoBridge
         private static MethodInfo targetMethod;
         private static Action<long, bool> onRefreshStarting;
         private static Action<long> onRefreshRequested;
-        private static Action<long> onMissingMetadataRequested;
+        private static Action<RefreshRequestInfo> onRefreshActionRequested;
         private static ILogger logger;
 
         public static void Install(
             Action<long, bool> startingCallback,
             Action<long> completedCallback,
-            Action<long> missingMetadataCallback,
+            Action<RefreshRequestInfo> actionCallback,
             ILogger pluginLogger)
         {
             if (harmony != null)
@@ -44,7 +61,7 @@ namespace ETKMediaInfoBridge
 
             onRefreshStarting = startingCallback;
             onRefreshRequested = completedCallback;
-            onMissingMetadataRequested = missingMetadataCallback;
+            onRefreshActionRequested = actionCallback;
             logger = pluginLogger;
             harmony = new Harmony(HarmonyId);
             harmony.Patch(
@@ -65,12 +82,13 @@ namespace ETKMediaInfoBridge
             targetMethod = null;
             onRefreshStarting = null;
             onRefreshRequested = null;
-            onMissingMetadataRequested = null;
+            onRefreshActionRequested = null;
             logger = null;
         }
 
-        private static void BeforeRefreshRequested(object __0)
+        private static void BeforeRefreshRequested(object __0, out RefreshRequestInfo __state)
         {
+            __state = null;
             try
             {
                 if (!TryGetItemId(__0, out var itemId))
@@ -85,6 +103,8 @@ namespace ETKMediaInfoBridge
                 var metadataModeValue = __0?.GetType().GetProperty("MetadataRefreshMode")?.GetValue(__0);
                 var metadataMode = Convert.ToString(metadataModeValue);
                 var imageMode = Convert.ToString(__0?.GetType().GetProperty("ImageRefreshMode")?.GetValue(__0));
+                var recursiveValue = __0?.GetType().GetProperty("Recursive")?.GetValue(__0);
+                var recursive = recursiveValue != null && Convert.ToBoolean(recursiveValue);
                 logger?.Info(
                     "ETK refresh request observed for Item {0}: metadata={1}, image={2}, replaceMetadata={3}, replaceImages={4}.",
                     itemId,
@@ -105,9 +125,23 @@ namespace ETKMediaInfoBridge
                         StringComparison.OrdinalIgnoreCase)
                     && !replaceAllMetadata
                     && !replaceAllImages;
-                if (isMissingMetadataRefresh)
+                var action = isMissingMetadataRefresh
+                    ? "missing_metadata"
+                    : replaceAllImages
+                        ? "replace_images"
+                        : "default";
+                if (!MediaInfoRefreshGuard.TryConsumeRefreshSuppression(itemId))
                 {
-                    onMissingMetadataRequested?.Invoke(itemId);
+                    __state = new RefreshRequestInfo
+                    {
+                        ItemId = itemId,
+                        Recursive = recursive,
+                        MetadataRefreshMode = metadataMode,
+                        ImageRefreshMode = imageMode,
+                        ReplaceAllMetadata = replaceAllMetadata,
+                        ReplaceAllImages = replaceAllImages,
+                        Action = action
+                    };
                 }
             }
             catch (Exception ex)
@@ -116,10 +150,14 @@ namespace ETKMediaInfoBridge
             }
         }
 
-        private static void AfterRefreshRequested(object __0)
+        private static void AfterRefreshRequested(object __0, RefreshRequestInfo __state)
         {
             try
             {
+                if (__state != null)
+                {
+                    onRefreshActionRequested?.Invoke(__state);
+                }
                 if (TryGetItemId(__0, out var itemId))
                 {
                     onRefreshRequested?.Invoke(itemId);
