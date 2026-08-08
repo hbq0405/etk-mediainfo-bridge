@@ -705,6 +705,9 @@ namespace ETKMediaInfoBridge
                         await this.NotifyItemReadyAsync(mediaInfoUrl, itemId).ConfigureAwait(false);
                     }
                 }
+                await this.RestoreMetadataAsync(
+                    itemId,
+                    cancellation.Token).ConfigureAwait(false);
                 var replaceState = this.TakeReplaceImageState(itemId);
                 await this.RestoreImagesAsync(
                     itemId,
@@ -740,6 +743,61 @@ namespace ETKMediaInfoBridge
                 }
                 cancellation.Dispose();
             }
+        }
+
+        private async Task RestoreMetadataAsync(
+            long itemId,
+            CancellationToken cancellationToken)
+        {
+            var item = this.libraryManager.GetItemById(itemId);
+            if (item == null)
+            {
+                return;
+            }
+
+            var itemType = item.GetType().Name;
+            if (!string.Equals(itemType, "Movie", StringComparison.Ordinal)
+                && !string.Equals(itemType, "Series", StringComparison.Ordinal)
+                && !string.Equals(itemType, "Season", StringComparison.Ordinal)
+                && !string.Equals(itemType, "Episode", StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            var payload = await EtkMetadataClient.GetAsync(
+                this.jsonSerializer,
+                item.Path,
+                itemType,
+                string.Equals(itemType, "Season", StringComparison.Ordinal)
+                    ? EtkMetadataClient.ResolveSeasonNumber(item.Path, item.IndexNumber)
+                    : item.ParentIndexNumber,
+                string.Equals(itemType, "Episode", StringComparison.Ordinal)
+                    ? item.IndexNumber
+                    : null,
+                cancellationToken,
+                this.libraryManager).ConfigureAwait(false);
+            if (payload == null)
+            {
+                return;
+            }
+
+            item.OfficialRating = payload.official_rating;
+            item.CustomRating = payload.custom_rating;
+            item.CommunityRating = payload.community_rating;
+            item.SetGenres((payload.genres ?? Array.Empty<string>())
+                .Where(value => !string.IsNullOrWhiteSpace(value)));
+            item.SetTags((payload.tags ?? Array.Empty<string>())
+                .Where(value => !string.IsNullOrWhiteSpace(value)));
+            item.SetStudios((payload.studios ?? Array.Empty<string>())
+                .Where(value => !string.IsNullOrWhiteSpace(value)));
+            MediaInfoRefreshGuard.Suppress(item.InternalId);
+            item.UpdateToRepository(ItemUpdateType.MetadataImport);
+            this.logger.Info(
+                "ETK metadata cache restored after refresh for Item {0}: genres={1}, tags={2}, studios={3}.",
+                itemId,
+                payload.genres?.Length ?? 0,
+                payload.tags?.Length ?? 0,
+                payload.studios?.Length ?? 0);
         }
 
         private async Task<bool> TryNotifyIntroAsync(
