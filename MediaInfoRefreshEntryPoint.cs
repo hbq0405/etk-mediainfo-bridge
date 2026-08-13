@@ -247,6 +247,8 @@ namespace ETKMediaInfoBridge
         private readonly IServerApplicationHost applicationHost;
         private readonly ConcurrentDictionary<long, CancellationTokenSource> pending =
             new ConcurrentDictionary<long, CancellationTokenSource>();
+        private readonly ConcurrentDictionary<long, CancellationTokenSource> pendingMetadata =
+            new ConcurrentDictionary<long, CancellationTokenSource>();
         private readonly ConcurrentDictionary<long, ReplaceImageState> replaceImageStates =
             new ConcurrentDictionary<long, ReplaceImageState>();
         private bool disposed;
@@ -391,6 +393,68 @@ namespace ETKMediaInfoBridge
                 return;
             }
             this.ScheduleRestoreTree(this.libraryManager.GetItemById(itemId));
+            this.ScheduleRootMetadataRestore(itemId);
+        }
+
+        private void ScheduleRootMetadataRestore(long itemId)
+        {
+            var item = this.libraryManager.GetItemById(itemId);
+            if (!(item is Movie) && !(item is Series))
+            {
+                return;
+            }
+            var cancellation = new CancellationTokenSource();
+            this.pendingMetadata.AddOrUpdate(
+                itemId,
+                cancellation,
+                (_, previous) =>
+                {
+                    try
+                    {
+                        previous.Cancel();
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                    }
+                    return cancellation;
+                });
+            _ = this.RestoreRootMetadataAfterRefreshAsync(itemId, cancellation);
+        }
+
+        private async Task RestoreRootMetadataAfterRefreshAsync(
+            long itemId,
+            CancellationTokenSource cancellation)
+        {
+            var slotAcquired = false;
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(12), cancellation.Token).ConfigureAwait(false);
+                await RestoreSlots.WaitAsync(cancellation.Token).ConfigureAwait(false);
+                slotAcquired = true;
+                await this.RestoreMetadataAsync(itemId, cancellation.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            catch (Exception ex)
+            {
+                this.logger.ErrorException(
+                    "ETK root metadata restore after refresh failed for Item " + itemId,
+                    ex);
+            }
+            finally
+            {
+                if (slotAcquired)
+                {
+                    RestoreSlots.Release();
+                }
+                if (this.pendingMetadata.TryGetValue(itemId, out var current)
+                    && ReferenceEquals(current, cancellation))
+                {
+                    this.pendingMetadata.TryRemove(itemId, out _);
+                }
+                cancellation.Dispose();
+            }
         }
 
         private void OnRefreshStarting(long itemId, bool replaceAllImages)
@@ -808,6 +872,37 @@ namespace ETKMediaInfoBridge
                 .Where(value => !string.IsNullOrWhiteSpace(value)));
             item.SetStudios((payload.studios ?? Array.Empty<string>())
                 .Where(value => !string.IsNullOrWhiteSpace(value)));
+            if (payload.actors_ready)
+            {
+                var people = new List<PersonInfo>();
+                foreach (var person in payload.people ?? Array.Empty<EtkMetadataPerson>())
+                {
+                    if (string.IsNullOrWhiteSpace(person.name))
+                    {
+                        continue;
+                    }
+                    var info = new PersonInfo
+                    {
+                        Name = person.name,
+                        Role = person.role,
+                        Type = string.Equals(person.type, "Director", StringComparison.OrdinalIgnoreCase)
+                            ? PersonType.Director
+                            : PersonType.Actor,
+                        ImageUrl = person.image_url
+                    };
+                    if (!string.IsNullOrWhiteSpace(person.tmdb_id))
+                    {
+                        info.ProviderIds["Tmdb"] = person.tmdb_id;
+                    }
+                    people.Add(info);
+                }
+                MediaInfoRefreshGuard.Suppress(item.InternalId);
+                this.libraryManager.UpdatePeople(item, people, false);
+                this.logger.Info(
+                    "ETK metadata people restored after refresh for Item {0}: people={1}.",
+                    itemId,
+                    people.Count);
+            }
             MediaInfoRefreshGuard.Suppress(item.InternalId);
             item.UpdateToRepository(ItemUpdateType.MetadataImport);
             this.logger.Info(
@@ -1124,6 +1219,17 @@ namespace ETKMediaInfoBridge
                 }
             }
             this.pending.Clear();
+            foreach (var cancellation in this.pendingMetadata.Values)
+            {
+                try
+                {
+                    cancellation.Cancel();
+                }
+                catch (ObjectDisposedException)
+                {
+                }
+            }
+            this.pendingMetadata.Clear();
             this.replaceImageStates.Clear();
         }
     }
