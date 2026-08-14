@@ -364,7 +364,8 @@ namespace ETKMediaInfoBridge
                 ["Type"] = item.GetType().Name,
                 ["Name"] = item.Name,
                 ["Path"] = item.Path,
-                ["RunTimeTicks"] = item.RunTimeTicks
+                ["RunTimeTicks"] = item.RunTimeTicks,
+                ["CustomRating"] = item.CustomRating
             };
             AddReflectedValue(payload, item, "SeriesId");
             AddReflectedValue(payload, item, "SeasonId");
