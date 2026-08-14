@@ -140,9 +140,18 @@ namespace ETKMediaInfoBridge
                 return;
             }
             if ((reason & ItemUpdateType.MetadataEdit) != 0
-                && ManualMetadataEditInterceptor.Consume(item.InternalId))
+                && ManualMetadataEditInterceptor.TryConsume(item.InternalId, out var metadataEdit))
             {
-                this.QueueEvent("metadata.update", item);
+                var extra = new Dictionary<string, object>();
+                if (metadataEdit.HasCustomRating)
+                {
+                    extra["Metadata"] = new Dictionary<string, object>
+                    {
+                        ["HasCustomRating"] = true,
+                        ["CustomRating"] = metadataEdit.CustomRating
+                    };
+                }
+                this.QueueEvent("metadata.update", item, extra: extra);
             }
         }
 

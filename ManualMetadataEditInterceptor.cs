@@ -9,9 +9,16 @@ namespace ETKMediaInfoBridge
 {
     internal static class ManualMetadataEditInterceptor
     {
+        internal sealed class ManualMetadataEdit
+        {
+            public DateTime ExpiresAt { get; set; }
+            public bool HasCustomRating { get; set; }
+            public string CustomRating { get; set; }
+        }
+
         private const string HarmonyId = "ETKMediaInfoBridge.ManualMetadataEdit";
-        private static readonly ConcurrentDictionary<long, DateTime> MarkedUntil =
-            new ConcurrentDictionary<long, DateTime>();
+        private static readonly ConcurrentDictionary<long, ManualMetadataEdit> MarkedEdits =
+            new ConcurrentDictionary<long, ManualMetadataEdit>();
         private static Harmony harmony;
         private static MethodInfo targetMethod;
         private static ILogger logger;
@@ -46,13 +53,13 @@ namespace ETKMediaInfoBridge
             logger.Info("ETK manual metadata edit hook is active.", Array.Empty<object>());
         }
 
-        public static bool Consume(long itemId)
+        public static bool TryConsume(long itemId, out ManualMetadataEdit edit)
         {
-            if (!MarkedUntil.TryRemove(itemId, out var until))
+            if (!MarkedEdits.TryRemove(itemId, out edit))
             {
                 return false;
             }
-            return until > DateTime.UtcNow;
+            return edit.ExpiresAt > DateTime.UtcNow;
         }
 
         public static void Uninstall()
@@ -62,7 +69,7 @@ namespace ETKMediaInfoBridge
                 return;
             }
             harmony.Unpatch(targetMethod, HarmonyPatchType.All, HarmonyId);
-            MarkedUntil.Clear();
+            MarkedEdits.Clear();
             harmony = null;
             targetMethod = null;
             logger = null;
@@ -84,7 +91,13 @@ namespace ETKMediaInfoBridge
                 var value = GetPropertyValue(__0, "ItemId");
                 if (long.TryParse(Convert.ToString(value), out var itemId) && itemId > 0)
                 {
-                    MarkedUntil[itemId] = DateTime.UtcNow.AddSeconds(10);
+                    var hasCustomRating = TryGetPropertyValue(__0, "CustomRating", out var customRating);
+                    MarkedEdits[itemId] = new ManualMetadataEdit
+                    {
+                        ExpiresAt = DateTime.UtcNow.AddSeconds(10),
+                        HasCustomRating = hasCustomRating,
+                        CustomRating = customRating == null ? null : Convert.ToString(customRating)
+                    };
                 }
             }
             catch (Exception ex)
@@ -110,6 +123,27 @@ namespace ETKMediaInfoBridge
                 }
             }
             return null;
+        }
+
+        private static bool TryGetPropertyValue(object instance, string name, out object value)
+        {
+            value = null;
+            if (instance == null)
+            {
+                return false;
+            }
+            for (var type = instance.GetType(); type != null; type = type.BaseType)
+            {
+                var property = type.GetProperty(
+                    name,
+                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                if (property != null)
+                {
+                    value = property.GetValue(instance);
+                    return true;
+                }
+            }
+            return false;
         }
     }
 }
