@@ -1039,20 +1039,20 @@ namespace ETKMediaInfoBridge
             {
                 return;
             }
-            var candidates = synced?.images ?? EtkImagePolicy.FromCached(payload?.images);
+            var candidates = synced?.images;
+            if (candidates == null || candidates.Length == 0)
+            {
+                candidates = EtkImagePolicy.FromCached(payload?.images);
+            }
 
             var restored = 0;
             var selected = EtkImagePolicy.Apply(candidates, rules, "ETK Images").ToArray();
             foreach (var rule in rules)
             {
                 var downloadLimit = rule.Limit;
-                var explicitEpisodePrimary = replaceExisting
-                    && item is Episode
-                    && rule.Type == ImageType.Primary;
                 if (libraryOptions != null
                     && !libraryOptions.DownloadImagesInAdvance
-                    && (rule.Type != ImageType.Primary || item is Episode)
-                    && !explicitEpisodePrimary)
+                    && rule.Type != ImageType.Primary)
                 {
                     if (!replaceExisting
                         || downloadedCounts == null

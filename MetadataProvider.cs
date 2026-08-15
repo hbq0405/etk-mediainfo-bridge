@@ -1252,7 +1252,7 @@ namespace ETKMediaInfoBridge
                 false,
                 cancellationToken,
                 this.libraryManager).ConfigureAwait(false);
-            if (synced != null)
+            if (synced?.images != null && synced.images.Length > 0)
             {
                 return EtkImagePolicy.Apply(
                     synced.images,
