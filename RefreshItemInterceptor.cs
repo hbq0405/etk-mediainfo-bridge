@@ -21,6 +21,8 @@ namespace ETKMediaInfoBridge
         public bool ReplaceAllImages { get; set; }
 
         public string Action { get; set; }
+
+        public bool Suppressed { get; set; }
     }
 
     internal static class RefreshItemInterceptor
@@ -28,14 +30,14 @@ namespace ETKMediaInfoBridge
         private const string HarmonyId = "ETKMediaInfoBridge.RefreshItem";
         private static Harmony harmony;
         private static MethodInfo targetMethod;
-        private static Action<long, bool> onRefreshStarting;
-        private static Action<long> onRefreshRequested;
+        private static Action<RefreshRequestInfo> onRefreshStarting;
+        private static Action<RefreshRequestInfo> onRefreshRequested;
         private static Action<RefreshRequestInfo> onRefreshActionRequested;
         private static ILogger logger;
 
         public static void Install(
-            Action<long, bool> startingCallback,
-            Action<long> completedCallback,
+            Action<RefreshRequestInfo> startingCallback,
+            Action<RefreshRequestInfo> completedCallback,
             Action<RefreshRequestInfo> actionCallback,
             ILogger pluginLogger)
         {
@@ -99,10 +101,10 @@ namespace ETKMediaInfoBridge
                 var replaceAllImages = replaceValue != null && Convert.ToBoolean(replaceValue);
                 var replaceMetadataValue = __0?.GetType().GetProperty("ReplaceAllMetadata")?.GetValue(__0);
                 var replaceAllMetadata = replaceMetadataValue != null && Convert.ToBoolean(replaceMetadataValue);
-                onRefreshStarting?.Invoke(itemId, replaceAllImages);
                 var metadataModeValue = __0?.GetType().GetProperty("MetadataRefreshMode")?.GetValue(__0);
-                var metadataMode = Convert.ToString(metadataModeValue);
-                var imageMode = Convert.ToString(__0?.GetType().GetProperty("ImageRefreshMode")?.GetValue(__0));
+                var metadataMode = NormalizeRefreshMode(metadataModeValue);
+                var imageMode = NormalizeRefreshMode(
+                    __0?.GetType().GetProperty("ImageRefreshMode")?.GetValue(__0));
                 var recursiveValue = __0?.GetType().GetProperty("Recursive")?.GetValue(__0);
                 var recursive = recursiveValue != null && Convert.ToBoolean(recursiveValue);
                 logger?.Info(
@@ -113,8 +115,10 @@ namespace ETKMediaInfoBridge
                     replaceAllMetadata,
                     replaceAllImages);
 
-                // Emby 4.9's dialog always uses FullRefresh. Only "search missing
-                // metadata" clears ReplaceAllMetadata without requesting images.
+                // Emby 4.9.0.35's missing-metadata dialog requests FullRefresh
+                // for both metadata and images. ETKN's cache restore deliberately
+                // uses ImageRefreshMode=ValidationOnly, so keep that internal
+                // path out of backfill even if suppression could not be consumed.
                 var isMissingMetadataRefresh = string.Equals(
                     metadataMode,
                     "FullRefresh",
@@ -123,26 +127,77 @@ namespace ETKMediaInfoBridge
                         imageMode,
                         "FullRefresh",
                         StringComparison.OrdinalIgnoreCase)
+                    && !replaceAllMetadata;
+                var isMetadataOnlyRefresh = string.Equals(
+                    metadataMode,
+                    "FullRefresh",
+                    StringComparison.OrdinalIgnoreCase)
+                    && !string.Equals(
+                        imageMode,
+                        "FullRefresh",
+                        StringComparison.OrdinalIgnoreCase)
+                    && !replaceAllMetadata
+                    && !replaceAllImages
+                    || string.Equals(
+                        metadataMode,
+                        "Default",
+                        StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(
+                        imageMode,
+                        "ValidationOnly",
+                        StringComparison.OrdinalIgnoreCase)
                     && !replaceAllMetadata
                     && !replaceAllImages;
                 var action = isMissingMetadataRefresh
-                    ? "missing_metadata"
+                    ? (replaceAllImages ? "missing_metadata_images" : "missing_metadata")
                     : replaceAllImages
                         ? "replace_images"
-                        : "default";
-                if (!MediaInfoRefreshGuard.TryConsumeRefreshSuppression(itemId))
+                        : isMetadataOnlyRefresh ? "metadata" : "default";
+                __state = new RefreshRequestInfo
                 {
-                    __state = new RefreshRequestInfo
+                    ItemId = itemId,
+                    Recursive = recursive,
+                    MetadataRefreshMode = metadataMode,
+                    ImageRefreshMode = imageMode,
+                    ReplaceAllMetadata = replaceAllMetadata,
+                    ReplaceAllImages = replaceAllImages,
+                    Action = action,
+                    Suppressed = MediaInfoRefreshGuard.TryConsumeRefreshSuppression(itemId)
+                };
+                if (!__state.Suppressed)
+                {
+                    // Keep the user-selected branch online while preventing
+                    // Emby's other native provider branch from doing its own
+                    // network lookup.  A combined missing+replace request keeps
+                    // the image branch online while ETKN owns metadata lookup.
+                    if (isMissingMetadataRefresh)
                     {
-                        ItemId = itemId,
-                        Recursive = recursive,
-                        MetadataRefreshMode = metadataMode,
-                        ImageRefreshMode = imageMode,
-                        ReplaceAllMetadata = replaceAllMetadata,
-                        ReplaceAllImages = replaceAllImages,
-                        Action = action
-                    };
+                        // ETKN's missing-metadata workflow is cache-first and
+                        // performs its own online fallback only when needed.
+                        TrySetRefreshMode(__0, "MetadataRefreshMode", "ValidationOnly");
+                        if (!replaceAllImages)
+                        {
+                            TrySetRefreshMode(__0, "ImageRefreshMode", "ValidationOnly");
+                        }
+                    }
+                    else if (replaceAllImages && !isMissingMetadataRefresh)
+                    {
+                        TrySetRefreshMode(__0, "MetadataRefreshMode", "ValidationOnly");
+                    }
+                    else if (isMetadataOnlyRefresh)
+                    {
+                        TrySetRefreshMode(__0, "ImageRefreshMode", "ValidationOnly");
+                    }
+                    else if (!isMissingMetadataRefresh && !replaceAllImages)
+                    {
+                        TrySetRefreshMode(__0, "MetadataRefreshMode", "ValidationOnly");
+                        TrySetRefreshMode(__0, "ImageRefreshMode", "ValidationOnly");
+                    }
                 }
+                // Suppressed requests are ETK-initiated.  The starting callback
+                // registers their restore policy too, but skips any online work;
+                // only unsuppressed user actions may trigger image prefetch.
+                onRefreshStarting?.Invoke(__state);
             }
             catch (Exception ex)
             {
@@ -156,11 +211,19 @@ namespace ETKMediaInfoBridge
             {
                 if (__state != null)
                 {
-                    onRefreshActionRequested?.Invoke(__state);
+                    if (!__state.Suppressed)
+                    {
+                        onRefreshActionRequested?.Invoke(__state);
+                    }
+                    onRefreshRequested?.Invoke(__state);
                 }
-                if (TryGetItemId(__0, out var itemId))
+                else if (TryGetItemId(__0, out var itemId))
                 {
-                    onRefreshRequested?.Invoke(itemId);
+                    onRefreshRequested?.Invoke(new RefreshRequestInfo
+                    {
+                        ItemId = itemId,
+                        Action = "default"
+                    });
                 }
             }
             catch (Exception ex)
@@ -173,6 +236,75 @@ namespace ETKMediaInfoBridge
         {
             var value = request?.GetType().GetProperty("Id")?.GetValue(request);
             return long.TryParse(Convert.ToString(value), out itemId) && itemId > 0;
+        }
+
+        private static string NormalizeRefreshMode(object value)
+        {
+            if (value == null)
+            {
+                return null;
+            }
+
+            var text = Convert.ToString(value);
+            if (!int.TryParse(text, out var numericValue))
+            {
+                try
+                {
+                    numericValue = Convert.ToInt32(value);
+                }
+                catch (Exception)
+                {
+                    return text;
+                }
+            }
+
+            // Emby 4.9 exposes the enum names, while older clients and some
+            // proxies can serialize the underlying values.  Keep the action
+            // classifier stable across both representations.
+            switch (numericValue)
+            {
+                case 1:
+                    return "ValidationOnly";
+                case 2:
+                    return "Default";
+                case 3:
+                    return "FullRefresh";
+                default:
+                    return text;
+            }
+        }
+
+        private static void TrySetRefreshMode(object request, string propertyName, string valueName)
+        {
+            try
+            {
+                var property = request?.GetType().GetProperty(
+                    propertyName,
+                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                if (property == null || !property.CanWrite)
+                {
+                    return;
+                }
+
+                var propertyType = Nullable.GetUnderlyingType(property.PropertyType)
+                    ?? property.PropertyType;
+                if (propertyType == typeof(string))
+                {
+                    property.SetValue(request, valueName);
+                }
+                else if (propertyType.IsEnum)
+                {
+                    var enumValue = Enum.Parse(propertyType, valueName, true);
+                    property.SetValue(request, enumValue);
+                }
+            }
+            catch (Exception ex)
+            {
+                logger?.Debug(
+                    "ETK could not constrain Emby refresh mode {0}: {1}",
+                    propertyName,
+                    ex.Message);
+            }
         }
     }
 }

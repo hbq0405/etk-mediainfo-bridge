@@ -309,14 +309,22 @@ namespace ETKMediaInfoBridge
             int? seasonNumber,
             int? episodeNumber,
             CancellationToken cancellationToken,
-            ILibraryManager libraryManager = null)
+            ILibraryManager libraryManager = null,
+            bool includeImages = true,
+            bool cacheOnlyImages = false)
         {
             var mediaInfoUrl = ResolveMediaInfoUrl(itemPath);
             string url;
             if (!string.IsNullOrEmpty(mediaInfoUrl))
             {
                 RememberEtkOrigin(mediaInfoUrl);
-                url = BuildMetadataUrl(mediaInfoUrl, itemType, seasonNumber, episodeNumber);
+                url = BuildMetadataUrl(
+                    mediaInfoUrl,
+                    itemType,
+                    seasonNumber,
+                    episodeNumber,
+                    includeImages,
+                    cacheOnlyImages);
             }
             else
             {
@@ -330,7 +338,9 @@ namespace ETKMediaInfoBridge
                     itemPath,
                     itemType,
                     seasonNumber,
-                    episodeNumber);
+                    episodeNumber,
+                    includeImages,
+                    cacheOnlyImages);
             }
             if (Cache.TryGetValue(url, out var cached)
                 && cached.Item1 > DateTime.UtcNow.AddSeconds(-1))
@@ -358,7 +368,8 @@ namespace ETKMediaInfoBridge
             IJsonSerializer serializer,
             ILibraryManager libraryManager,
             string tmdbId,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            bool cacheOnlyImages = false)
         {
             var origin = ResolveEtkOrigin(libraryManager);
             if (string.IsNullOrEmpty(origin) || string.IsNullOrWhiteSpace(tmdbId))
@@ -367,6 +378,10 @@ namespace ETKMediaInfoBridge
             }
             var url = origin + "/api/collections/provider/metadata/"
                 + Uri.EscapeDataString(tmdbId.Trim());
+            if (cacheOnlyImages)
+            {
+                url += "?cache_only_images=true";
+            }
             using (var response = await HttpClient.GetAsync(url, cancellationToken).ConfigureAwait(false))
             {
                 if (!response.IsSuccessStatusCode)
@@ -733,7 +748,9 @@ namespace ETKMediaInfoBridge
             string mediaInfoUrl,
             string itemType,
             int? seasonNumber,
-            int? episodeNumber)
+            int? episodeNumber,
+            bool includeImages,
+            bool cacheOnlyImages)
         {
             var values = new List<string>
             {
@@ -747,6 +764,14 @@ namespace ETKMediaInfoBridge
             {
                 values.Add("episode_number=" + episodeNumber.Value);
             }
+            if (!includeImages)
+            {
+                values.Add("include_images=false");
+            }
+            else if (cacheOnlyImages)
+            {
+                values.Add("cache_only_images=true");
+            }
             return mediaInfoUrl.TrimEnd('/') + "/metadata?" + string.Join("&", values);
         }
 
@@ -755,7 +780,9 @@ namespace ETKMediaInfoBridge
             string itemPath,
             string itemType,
             int? seasonNumber,
-            int? episodeNumber)
+            int? episodeNumber,
+            bool includeImages,
+            bool cacheOnlyImages)
         {
             var values = new List<string>
             {
@@ -769,6 +796,14 @@ namespace ETKMediaInfoBridge
             if (episodeNumber.HasValue)
             {
                 values.Add("episode_number=" + episodeNumber.Value);
+            }
+            if (!includeImages)
+            {
+                values.Add("include_images=false");
+            }
+            else if (cacheOnlyImages)
+            {
+                values.Add("cache_only_images=true");
             }
             return origin.TrimEnd('/') + "/api/emby/metadata?" + string.Join("&", values);
         }

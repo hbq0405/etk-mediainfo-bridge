@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Net.Http;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using MediaBrowser.Common.Configuration;
@@ -98,7 +99,8 @@ namespace ETKMediaInfoBridge
                     null,
                     null,
                     CancellationToken.None,
-                    libraryManager).ConfigureAwait(false);
+                    libraryManager,
+                    includeImages: false).ConfigureAwait(false);
                 collections = payload?.collections;
             }
             if (collections == null || collections.Length == 0)
@@ -229,11 +231,35 @@ namespace ETKMediaInfoBridge
             public bool PolicyRefreshed { get; set; }
         }
 
+        private sealed class RefreshRestoreOptions
+        {
+            public bool RestoreMetadata { get; set; } = true;
+
+            public bool RestoreImages { get; set; } = true;
+
+            public bool AllowOnlineImages { get; set; }
+
+            public bool ReplaceExistingImages { get; set; }
+
+            public bool OverwriteMetadata { get; set; }
+        }
+
+        private sealed class PendingRefreshContext
+        {
+            public RefreshRestoreOptions Options { get; set; }
+
+            public DateTime ExpiresAt { get; set; }
+        }
+
         private static readonly HttpClient HttpClient = new HttpClient
         {
             Timeout = TimeSpan.FromSeconds(15)
         };
         private static readonly SemaphoreSlim RestoreSlots = new SemaphoreSlim(4, 4);
+        private static readonly TimeSpan RefreshContextLifetime = TimeSpan.FromMinutes(30);
+        private static readonly Regex EpisodePlaceholderName = new Regex(
+            @"^(?:第\s*\d+\s*集|Episode\s*\d+)$",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
         private readonly ILibraryManager libraryManager;
         private readonly IApplicationPaths applicationPaths;
@@ -251,6 +277,8 @@ namespace ETKMediaInfoBridge
             new ConcurrentDictionary<long, CancellationTokenSource>();
         private readonly ConcurrentDictionary<long, ReplaceImageState> replaceImageStates =
             new ConcurrentDictionary<long, ReplaceImageState>();
+        private readonly ConcurrentDictionary<long, PendingRefreshContext> pendingRefreshContexts =
+            new ConcurrentDictionary<long, PendingRefreshContext>();
         private bool disposed;
 
         public MediaInfoRefreshEntryPoint(
@@ -383,20 +411,30 @@ namespace ETKMediaInfoBridge
                 return;
             }
 
-            this.ScheduleRestoreTree(item);
+            this.ScheduleRestoreTree(item, this.ResolveRefreshOptions(item));
         }
 
-        private void OnRefreshRequested(long itemId)
+        private void OnRefreshRequested(RefreshRequestInfo request)
         {
-            if (this.disposed)
+            if (this.disposed || request == null || request.ItemId <= 0)
             {
                 return;
             }
-            this.ScheduleRestoreTree(this.libraryManager.GetItemById(itemId));
-            this.ScheduleRootMetadataRestore(itemId);
+            var item = this.libraryManager.GetItemById(request.ItemId);
+            if (item == null)
+            {
+                return;
+            }
+            var options = this.BuildRefreshRestoreOptions(request);
+            this.RegisterRefreshContext(item, options);
+            this.ScheduleRestoreTree(item, options);
+            if (options.RestoreMetadata)
+            {
+                this.ScheduleRootMetadataRestore(request.ItemId, options);
+            }
         }
 
-        private void ScheduleRootMetadataRestore(long itemId)
+        private void ScheduleRootMetadataRestore(long itemId, RefreshRestoreOptions options)
         {
             var item = this.libraryManager.GetItemById(itemId);
             if (!(item is Movie) && !(item is Series))
@@ -418,12 +456,13 @@ namespace ETKMediaInfoBridge
                     }
                     return cancellation;
                 });
-            _ = this.RestoreRootMetadataAfterRefreshAsync(itemId, cancellation);
+            _ = this.RestoreRootMetadataAfterRefreshAsync(itemId, cancellation, options);
         }
 
         private async Task RestoreRootMetadataAfterRefreshAsync(
             long itemId,
-            CancellationTokenSource cancellation)
+            CancellationTokenSource cancellation,
+            RefreshRestoreOptions options)
         {
             var slotAcquired = false;
             try
@@ -431,7 +470,13 @@ namespace ETKMediaInfoBridge
                 await Task.Delay(TimeSpan.FromSeconds(12), cancellation.Token).ConfigureAwait(false);
                 await RestoreSlots.WaitAsync(cancellation.Token).ConfigureAwait(false);
                 slotAcquired = true;
-                await this.RestoreMetadataAsync(itemId, cancellation.Token).ConfigureAwait(false);
+                if (options == null || options.RestoreMetadata)
+                {
+                    await this.RestoreMetadataAsync(
+                        itemId,
+                        cancellation.Token,
+                        options != null && options.OverwriteMetadata).ConfigureAwait(false);
+                }
             }
             catch (OperationCanceledException)
             {
@@ -457,14 +502,153 @@ namespace ETKMediaInfoBridge
             }
         }
 
-        private void OnRefreshStarting(long itemId, bool replaceAllImages)
+        private RefreshRestoreOptions BuildRefreshRestoreOptions(RefreshRequestInfo request)
         {
-            if (this.disposed || !replaceAllImages)
+            if (request == null)
+            {
+                return new RefreshRestoreOptions();
+            }
+
+            var action = (request.Action ?? string.Empty).Trim().ToLowerInvariant();
+            if (request.Suppressed)
+            {
+                // ETKN-initiated refreshes carry no webhook action.  Infer the
+                // requested branches from the raw Emby modes so internal
+                // metadata_images refreshes still restore both cache branches.
+                var metadataRequested = request.ReplaceAllMetadata
+                    || string.Equals(
+                        request.MetadataRefreshMode,
+                        "FullRefresh",
+                        StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(action, "metadata", StringComparison.Ordinal)
+                    || string.Equals(action, "metadata_images", StringComparison.Ordinal);
+                var imagesRequested = request.ReplaceAllImages
+                    || string.Equals(
+                        request.ImageRefreshMode,
+                        "FullRefresh",
+                        StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(action, "images", StringComparison.Ordinal)
+                    || string.Equals(action, "metadata_images", StringComparison.Ordinal);
+                var onlineImages = request.ReplaceAllImages
+                    || string.Equals(action, "images", StringComparison.Ordinal);
+                if (string.Equals(action, "default", StringComparison.Ordinal)
+                    && !metadataRequested
+                    && !imagesRequested)
+                {
+                    metadataRequested = true;
+                    imagesRequested = true;
+                }
+                return new RefreshRestoreOptions
+                {
+                    RestoreMetadata = metadataRequested,
+                    RestoreImages = imagesRequested,
+                    AllowOnlineImages = onlineImages,
+                    ReplaceExistingImages = onlineImages,
+                    // Suppressed requests originate from ETKN after its cache
+                    // has been persisted. Treat that cache as authoritative so
+                    // changed titles/overviews replace stale Emby values too.
+                    OverwriteMetadata = metadataRequested || request.ReplaceAllMetadata
+                };
+            }
+
+            var missingMetadata = string.Equals(action, "missing_metadata", StringComparison.Ordinal);
+            var missingMetadataImages = string.Equals(action, "missing_metadata_images", StringComparison.Ordinal);
+            var metadataOnly = string.Equals(action, "metadata", StringComparison.Ordinal);
+            var replaceImages = request.ReplaceAllImages
+                || string.Equals(action, "replace_images", StringComparison.Ordinal);
+            return new RefreshRestoreOptions
+            {
+                // Replacing images is independent from metadata.  A combined
+                // missing-metadata + image request keeps both branches enabled.
+                RestoreMetadata = !string.Equals(action, "replace_images", StringComparison.Ordinal),
+                RestoreImages = !metadataOnly && (!missingMetadata || replaceImages || missingMetadataImages),
+                AllowOnlineImages = replaceImages || missingMetadataImages,
+                ReplaceExistingImages = replaceImages || missingMetadataImages,
+                OverwriteMetadata = string.Equals(action, "default", StringComparison.Ordinal)
+            };
+        }
+
+        private void RegisterRefreshContext(BaseItem item, RefreshRestoreOptions options)
+        {
+            if (item == null || options == null)
             {
                 return;
             }
-            var item = this.libraryManager.GetItemById(itemId);
+
+            var context = new PendingRefreshContext
+            {
+                Options = options,
+                ExpiresAt = DateTime.UtcNow.Add(RefreshContextLifetime)
+            };
+            this.pendingRefreshContexts[item.InternalId] = context;
+            var itemType = item.GetType().Name;
+            if (!string.Equals(itemType, "CollectionFolder", StringComparison.Ordinal)
+                && !string.Equals(itemType, "Series", StringComparison.Ordinal)
+                && !string.Equals(itemType, "Season", StringComparison.Ordinal)
+                && !string.Equals(itemType, "BoxSet", StringComparison.Ordinal))
+            {
+                return;
+            }
+            try
+            {
+                foreach (var child in this.libraryManager.GetItemList(new InternalItemsQuery
+                {
+                    Parent = item,
+                    Recursive = true,
+                    IncludeItemTypes = new[] { "Movie", "Series", "Season", "Episode" }
+                }))
+                {
+                    this.pendingRefreshContexts[child.InternalId] = context;
+                }
+            }
+            catch (Exception ex)
+            {
+                this.logger.Debug(
+                    "ETK refresh context descendant registration failed for Item {0}: {1}",
+                    item.InternalId,
+                    ex.Message);
+            }
+        }
+
+        private RefreshRestoreOptions ResolveRefreshOptions(BaseItem item)
+        {
+            this.RemoveExpiredRefreshContexts();
+            if (item != null
+                && this.pendingRefreshContexts.TryGetValue(item.InternalId, out var context)
+                && context.ExpiresAt > DateTime.UtcNow
+                && context.Options != null)
+            {
+                return context.Options;
+            }
+            return new RefreshRestoreOptions();
+        }
+
+        private void RemoveExpiredRefreshContexts()
+        {
+            var now = DateTime.UtcNow;
+            foreach (var pair in this.pendingRefreshContexts)
+            {
+                if (pair.Value == null || pair.Value.ExpiresAt <= now)
+                {
+                    this.pendingRefreshContexts.TryRemove(pair.Key, out _);
+                }
+            }
+        }
+
+        private void OnRefreshStarting(RefreshRequestInfo request)
+        {
+            if (this.disposed || request == null || request.ItemId <= 0)
+            {
+                return;
+            }
+            var item = this.libraryManager.GetItemById(request.ItemId);
             if (item == null)
+            {
+                return;
+            }
+            var options = this.BuildRefreshRestoreOptions(request);
+            this.RegisterRefreshContext(item, options);
+            if (request.Suppressed || !request.ReplaceAllImages)
             {
                 return;
             }
@@ -476,6 +660,26 @@ namespace ETKMediaInfoBridge
                 : null;
             if (itemType == null)
             {
+                return;
+            }
+            if (item is BoxSet)
+            {
+                // The ETKN image endpoint intentionally has no BoxSet contract.
+                // Do not claim that the root policy was refreshed (which would
+                // make the later restore look successful); process only the
+                // concrete movie/series members below.
+                this.logger.Warn(
+                    "ETK Images skipped online BoxSet root replacement for Item {0}; processing members only.",
+                    request.ItemId);
+                foreach (var member in this.libraryManager.GetItemList(new InternalItemsQuery
+                {
+                    Parent = item,
+                    Recursive = true,
+                    IncludeItemTypes = new[] { "Movie", "Series", "Season", "Episode" }
+                }))
+                {
+                    this.RegisterReplaceImageState(member, false);
+                }
                 return;
             }
             var seasonNumber = item is Season
@@ -490,55 +694,40 @@ namespace ETKMediaInfoBridge
                 rule => rule.Type,
                 rule => item.GetImages(rule.Type).Count());
             var refreshed = EtkMetadataClient.RefreshImagesAsync(
-                this.jsonSerializer,
-                item.Path,
-                itemType,
-                seasonNumber,
-                episodeNumber,
-                tmdbId,
-                imageRules,
-                CancellationToken.None,
-                this.libraryManager,
-                this.logger).GetAwaiter().GetResult();
+                    this.jsonSerializer,
+                    item.Path,
+                    itemType,
+                    seasonNumber,
+                    episodeNumber,
+                    tmdbId,
+                    imageRules,
+                    CancellationToken.None,
+                    this.libraryManager,
+                    this.logger).GetAwaiter().GetResult();
             if (refreshed)
             {
-                this.replaceImageStates[itemId] = new ReplaceImageState
-                {
-                    ExpiresAt = DateTime.UtcNow.AddMinutes(10),
-                    DownloadedCounts = downloadedCounts,
-                    PolicyRefreshed = true
-                };
+                this.RegisterReplaceImageState(item, true, downloadedCounts);
                 if (item is Series || item is Season)
                 {
                     foreach (var episode in this.libraryManager.GetItemList(new InternalItemsQuery
                     {
                         Parent = item,
                         Recursive = true,
-                        IncludeItemTypes = new[] { "Episode" }
+                        IncludeItemTypes = new[] { "Season", "Episode" }
                     }))
                     {
-                        var episodeRules = EtkImagePolicy.GetRules(
-                            episode,
-                            this.libraryManager.GetLibraryOptions(episode));
-                        this.replaceImageStates[episode.InternalId] = new ReplaceImageState
-                        {
-                            ExpiresAt = DateTime.UtcNow.AddMinutes(10),
-                            DownloadedCounts = episodeRules.ToDictionary(
-                                rule => rule.Type,
-                                rule => episode.GetImages(rule.Type).Count()),
-                            PolicyRefreshed = false
-                        };
+                        this.RegisterReplaceImageState(episode, false);
                     }
                 }
                 this.logger.Info(
                     "ETK Images synchronized the image policy cache before replacing images for Item {0}.",
-                    itemId);
+                    request.ItemId);
             }
             else
             {
                 this.logger.Warn(
                     "ETK Images could not synchronize the image policy cache before replacing images for Item {0}.",
-                    itemId);
+                    request.ItemId);
             }
         }
 
@@ -601,9 +790,10 @@ namespace ETKMediaInfoBridge
                             "ETK refresh event returned HTTP {0} for Item {1}.",
                             (int)response.StatusCode,
                             request.ItemId);
-                    }
                 }
             }
+        }
+
             catch (Exception ex)
             {
                 this.logger.Debug(
@@ -613,7 +803,31 @@ namespace ETKMediaInfoBridge
             }
         }
 
-        private void ScheduleRestoreTree(BaseItem item)
+        private void RegisterReplaceImageState(
+            BaseItem item,
+            bool policyRefreshed,
+            Dictionary<ImageType, int> downloadedCounts = null)
+        {
+            if (item == null)
+            {
+                return;
+            }
+            var rules = EtkImagePolicy.GetRules(
+                item,
+                this.libraryManager.GetLibraryOptions(item));
+            this.replaceImageStates[item.InternalId] = new ReplaceImageState
+            {
+                ExpiresAt = DateTime.UtcNow.AddMinutes(10),
+                DownloadedCounts = downloadedCounts ?? rules.ToDictionary(
+                    rule => rule.Type,
+                    rule => item.GetImages(rule.Type).Count()),
+                PolicyRefreshed = policyRefreshed
+            };
+        }
+
+        private void ScheduleRestoreTree(
+            BaseItem item,
+            RefreshRestoreOptions options = null)
         {
             if (item == null || MediaInfoRefreshGuard.IsSuppressed(item.InternalId))
             {
@@ -634,27 +848,64 @@ namespace ETKMediaInfoBridge
                     children.Count);
                 foreach (var child in children)
                 {
-                    this.ScheduleRestoreTree(child);
+                    this.ScheduleRestoreTree(child, options);
+                }
+                return;
+            }
+            if (string.Equals(itemType, "BoxSet", StringComparison.Ordinal))
+            {
+                var members = this.libraryManager.GetItemList(new InternalItemsQuery
+                {
+                    Parent = item,
+                    Recursive = true,
+                    IncludeItemTypes = new[] { "Movie", "Series", "Season", "Episode" }
+                }).ToList();
+                this.logger.Info(
+                    "ETK metadata cache restore expanded BoxSet {0} to {1} members.",
+                    item.InternalId,
+                    members.Count);
+                foreach (var member in members)
+                {
+                    this.ScheduleRestore(
+                        member,
+                        imagesOnly: options == null || !options.RestoreMetadata,
+                        options: options);
+                }
+                if (options == null || !options.AllowOnlineImages)
+                {
+                    this.ScheduleRestore(
+                        item,
+                        imagesOnly: options == null || !options.RestoreMetadata,
+                        options: options);
                 }
                 return;
             }
             if (string.Equals(itemType, "Series", StringComparison.Ordinal)
                 || string.Equals(itemType, "Season", StringComparison.Ordinal))
             {
-                this.ScheduleRestore(item, imagesOnly: true);
+                this.ScheduleRestore(
+                    item,
+                    imagesOnly: options == null || !options.RestoreMetadata,
+                    options: options);
                 foreach (var episode in this.libraryManager.GetItemList(new InternalItemsQuery
                 {
                     Parent = item,
                     Recursive = true,
-                    IncludeItemTypes = new[] { "Episode" }
+                    IncludeItemTypes = new[] { "Season", "Episode" }
                 }))
                 {
-                    this.ScheduleRestore(episode);
+                    this.ScheduleRestore(
+                        episode,
+                        imagesOnly: options == null || !options.RestoreMetadata,
+                        options: options);
                 }
                 return;
             }
 
-            this.ScheduleRestore(item);
+            this.ScheduleRestore(
+                item,
+                imagesOnly: options == null || !options.RestoreMetadata,
+                options: options);
         }
 
         private void OnItemAdded(object sender, ItemChangeEventArgs eventArgs)
@@ -664,13 +915,17 @@ namespace ETKMediaInfoBridge
             {
                 return;
             }
-            this.ScheduleRestore(item, dropConflictingExternalStreams: true);
+            this.ScheduleRestore(
+                item,
+                dropConflictingExternalStreams: true,
+                options: this.ResolveRefreshOptions(item));
         }
 
         private void ScheduleRestore(
             BaseItem item,
             bool dropConflictingExternalStreams = false,
-            bool imagesOnly = false)
+            bool imagesOnly = false,
+            RefreshRestoreOptions options = null)
         {
             if (item == null || MediaInfoRefreshGuard.IsSuppressed(item.InternalId))
             {
@@ -696,7 +951,8 @@ namespace ETKMediaInfoBridge
                 if (!string.Equals(itemType, "Movie", StringComparison.Ordinal)
                     && !string.Equals(itemType, "Series", StringComparison.Ordinal)
                     && !string.Equals(itemType, "Season", StringComparison.Ordinal)
-                    && !string.Equals(itemType, "Episode", StringComparison.Ordinal))
+                    && !string.Equals(itemType, "Episode", StringComparison.Ordinal)
+                    && !string.Equals(itemType, "BoxSet", StringComparison.Ordinal))
                 {
                     return;
                 }
@@ -722,7 +978,8 @@ namespace ETKMediaInfoBridge
                 mediaInfoUrl,
                 cancellation,
                 dropConflictingExternalStreams,
-                imagesOnly);
+                imagesOnly,
+                options ?? new RefreshRestoreOptions());
         }
 
         private async Task RestoreAfterRefreshAsync(
@@ -730,7 +987,8 @@ namespace ETKMediaInfoBridge
             string mediaInfoUrl,
             CancellationTokenSource cancellation,
             bool dropConflictingExternalStreams,
-            bool imagesOnly)
+            bool imagesOnly,
+            RefreshRestoreOptions options)
         {
             var slotAcquired = false;
             try
@@ -739,7 +997,9 @@ namespace ETKMediaInfoBridge
                 await RestoreSlots.WaitAsync(cancellation.Token).ConfigureAwait(false);
                 slotAcquired = true;
                 var item = this.libraryManager.GetItemById(itemId);
-                if (item is Episode && !string.IsNullOrEmpty(mediaInfoUrl))
+                if ((options == null || options.RestoreMetadata)
+                    && item is Episode
+                    && !string.IsNullOrEmpty(mediaInfoUrl))
                 {
                     var chapters = EmbyRepositoryCompat.GetChapters(
                         this.itemRepository,
@@ -757,7 +1017,9 @@ namespace ETKMediaInfoBridge
                         await this.TryNotifyIntroAsync(itemId, mediaInfoUrl, chapters).ConfigureAwait(false);
                     }
                 }
-                if (!imagesOnly && !string.IsNullOrEmpty(mediaInfoUrl))
+                if ((options == null || options.RestoreMetadata)
+                    && !imagesOnly
+                    && !string.IsNullOrEmpty(mediaInfoUrl))
                 {
                     using (var response = await HttpClient.GetAsync(mediaInfoUrl, cancellation.Token).ConfigureAwait(false))
                     {
@@ -767,42 +1029,59 @@ namespace ETKMediaInfoBridge
                                 "ETK MediaInfo cache request skipped for Item {0}: HTTP {1}",
                                 itemId,
                                 (int)response.StatusCode);
-                            return;
                         }
-
-                        var json = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
-                        var payload = this.jsonSerializer.DeserializeFromString<ApplyEtkMediaInfo>(json);
-                        var result = MediaInfoImporter.Apply(
-                            this.libraryManager,
-                            this.itemRepository,
-                            itemId,
-                            payload?.MediaSourceInfo,
-                            payload?.Chapters,
-                            IntroChapterSnapshotStore.Get(itemId),
-                            dropConflictingExternalStreams);
-                        this.logger.Info(
-                            "ETK MediaInfo restored after refresh for Item {0}: {1} streams.",
-                            itemId,
-                            result.StreamCount);
-                        await this.NotifyItemReadyAsync(mediaInfoUrl, itemId).ConfigureAwait(false);
+                        else
+                        {
+                            var json = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                            var payload = this.jsonSerializer.DeserializeFromString<ApplyEtkMediaInfo>(json);
+                            var result = MediaInfoImporter.Apply(
+                                this.libraryManager,
+                                this.itemRepository,
+                                itemId,
+                                payload?.MediaSourceInfo,
+                                payload?.Chapters,
+                                IntroChapterSnapshotStore.Get(itemId),
+                                dropConflictingExternalStreams);
+                            this.logger.Info(
+                                "ETK MediaInfo restored after refresh for Item {0}: {1} streams.",
+                                itemId,
+                                result.StreamCount);
+                            await this.NotifyItemReadyAsync(mediaInfoUrl, itemId).ConfigureAwait(false);
+                        }
                     }
                 }
-                await this.RestoreMetadataAsync(
-                    itemId,
-                    cancellation.Token).ConfigureAwait(false);
-                var replaceState = this.TakeReplaceImageState(itemId);
-                await this.RestoreImagesAsync(
-                    itemId,
-                    replaceState != null,
-                    replaceState?.DownloadedCounts,
-                    replaceState != null && !replaceState.PolicyRefreshed,
-                    CancellationToken.None).ConfigureAwait(false);
-                await EtkCollectionRestorer.RestoreAsync(
-                    this.libraryManager,
-                    this.collectionManager,
-                    this.jsonSerializer,
-                    this.logger,
-                    itemId).ConfigureAwait(false);
+                if (options == null || options.RestoreMetadata)
+                {
+                    await this.RestoreMetadataAsync(
+                        itemId,
+                        cancellation.Token,
+                        options != null && options.OverwriteMetadata).ConfigureAwait(false);
+                }
+                if (options == null || options.RestoreImages)
+                {
+                    var allowOnlineImages = options != null && options.AllowOnlineImages;
+                    var replaceState = allowOnlineImages
+                        ? this.TakeReplaceImageState(itemId)
+                        : null;
+                    var replaceExisting = allowOnlineImages
+                        && (options.ReplaceExistingImages || replaceState != null);
+                    await this.RestoreImagesAsync(
+                        itemId,
+                        replaceExisting,
+                        replaceState?.DownloadedCounts,
+                        allowOnlineImages && (replaceState == null || !replaceState.PolicyRefreshed),
+                        CancellationToken.None,
+                        allowOnlineImages).ConfigureAwait(false);
+                }
+                if (options == null || options.RestoreMetadata)
+                {
+                    await EtkCollectionRestorer.RestoreAsync(
+                        this.libraryManager,
+                        this.collectionManager,
+                        this.jsonSerializer,
+                        this.logger,
+                        itemId).ConfigureAwait(false);
+                }
             }
             catch (OperationCanceledException)
             {
@@ -829,7 +1108,8 @@ namespace ETKMediaInfoBridge
 
         private async Task RestoreMetadataAsync(
             long itemId,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            bool overwriteExisting = false)
         {
             var item = this.libraryManager.GetItemById(itemId);
             if (item == null)
@@ -857,21 +1137,122 @@ namespace ETKMediaInfoBridge
                     ? item.IndexNumber
                     : null,
                 cancellationToken,
-                this.libraryManager).ConfigureAwait(false);
+                this.libraryManager,
+                cacheOnlyImages: true).ConfigureAwait(false);
             if (payload == null)
             {
                 return;
             }
 
-            item.OfficialRating = payload.official_rating;
-            item.CustomRating = payload.custom_rating;
-            item.CommunityRating = payload.community_rating;
-            item.SetGenres((payload.genres ?? Array.Empty<string>())
-                .Where(value => !string.IsNullOrWhiteSpace(value)));
-            item.SetTags((payload.tags ?? Array.Empty<string>())
-                .Where(value => !string.IsNullOrWhiteSpace(value)));
-            item.SetStudios((payload.studios ?? Array.Empty<string>())
-                .Where(value => !string.IsNullOrWhiteSpace(value)));
+            var cachedName = (payload.name ?? string.Empty).Trim();
+            var currentName = (item.Name ?? string.Empty).Trim();
+            if (!string.IsNullOrEmpty(cachedName)
+                && (overwriteExisting
+                    || string.IsNullOrEmpty(currentName)
+                    || (item is Episode && EpisodePlaceholderName.IsMatch(currentName))))
+            {
+                item.Name = cachedName;
+            }
+            var cachedOverview = (payload.overview ?? string.Empty).Trim();
+            if (!string.IsNullOrEmpty(cachedOverview)
+                && (overwriteExisting || string.IsNullOrWhiteSpace(item.Overview)))
+            {
+                item.Overview = cachedOverview;
+            }
+            if (!string.IsNullOrWhiteSpace(payload.original_title)
+                && (overwriteExisting || string.IsNullOrWhiteSpace(item.OriginalTitle)))
+            {
+                item.OriginalTitle = payload.original_title;
+            }
+            if (!string.IsNullOrWhiteSpace(payload.tagline)
+                && (overwriteExisting || string.IsNullOrWhiteSpace(item.Tagline)))
+            {
+                item.Tagline = payload.tagline;
+            }
+            if (DateTimeOffset.TryParse(payload.premiere_date, out var premiereDate)
+                && (overwriteExisting || !item.PremiereDate.HasValue))
+            {
+                item.PremiereDate = premiereDate;
+            }
+            if (DateTimeOffset.TryParse(payload.end_date, out var endDate)
+                && (overwriteExisting || !item.EndDate.HasValue))
+            {
+                item.EndDate = endDate;
+            }
+            if (payload.production_year.HasValue
+                && (overwriteExisting || !item.ProductionYear.HasValue))
+            {
+                item.ProductionYear = payload.production_year;
+            }
+            if (payload.runtime_minutes.HasValue
+                && payload.runtime_minutes.Value > 0
+                && (overwriteExisting || !item.RunTimeTicks.HasValue || item.RunTimeTicks <= 0))
+            {
+                item.RunTimeTicks = TimeSpan.FromMinutes(payload.runtime_minutes.Value).Ticks;
+            }
+            if (item is Season && payload.season_number.HasValue)
+            {
+                if (overwriteExisting || !item.IndexNumber.HasValue)
+                {
+                    item.IndexNumber = payload.season_number;
+                }
+            }
+            else if (item is Episode)
+            {
+                if (payload.episode_number.HasValue
+                    && (overwriteExisting || !item.IndexNumber.HasValue))
+                {
+                    item.IndexNumber = payload.episode_number;
+                }
+                if (payload.season_number.HasValue
+                    && (overwriteExisting || !item.ParentIndexNumber.HasValue))
+                {
+                    item.ParentIndexNumber = payload.season_number;
+                }
+            }
+            if (!string.IsNullOrWhiteSpace(payload.tmdb_id))
+            {
+                item.ProviderIds["Tmdb"] = payload.tmdb_id.Trim();
+            }
+            else if (!string.IsNullOrWhiteSpace(payload.series_tmdb_id)
+                && (item is Series || item is Season || item is Episode))
+            {
+                item.ProviderIds["Tmdb"] = payload.series_tmdb_id.Trim();
+            }
+            if (!string.IsNullOrWhiteSpace(payload.imdb_id))
+            {
+                item.ProviderIds["Imdb"] = payload.imdb_id.Trim();
+            }
+            if (payload.official_rating != null
+                && (overwriteExisting || string.IsNullOrWhiteSpace(item.OfficialRating)))
+            {
+                item.OfficialRating = payload.official_rating;
+            }
+            if (payload.custom_rating != null
+                && (overwriteExisting || string.IsNullOrWhiteSpace(item.CustomRating)))
+            {
+                item.CustomRating = payload.custom_rating;
+            }
+            if (payload.community_rating.HasValue
+                && (overwriteExisting || !item.CommunityRating.HasValue))
+            {
+                item.CommunityRating = payload.community_rating;
+            }
+            if (payload.genres != null
+                && (overwriteExisting || payload.genres.Any(value => !string.IsNullOrWhiteSpace(value))))
+            {
+                item.SetGenres(payload.genres.Where(value => !string.IsNullOrWhiteSpace(value)));
+            }
+            if (payload.tags != null
+                && (overwriteExisting || payload.tags.Any(value => !string.IsNullOrWhiteSpace(value))))
+            {
+                item.SetTags(payload.tags.Where(value => !string.IsNullOrWhiteSpace(value)));
+            }
+            if (payload.studios != null
+                && (overwriteExisting || payload.studios.Any(value => !string.IsNullOrWhiteSpace(value))))
+            {
+                item.SetStudios(payload.studios.Where(value => !string.IsNullOrWhiteSpace(value)));
+            }
             if (payload.actors_ready)
             {
                 var people = new List<PersonInfo>();
@@ -966,7 +1347,8 @@ namespace ETKMediaInfoBridge
             bool replaceExisting,
             IReadOnlyDictionary<ImageType, int> downloadedCounts,
             bool refreshPolicy,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            bool allowCachedImageSync)
         {
             var item = this.libraryManager.GetItemById(itemId);
             if (item == null)
@@ -984,28 +1366,33 @@ namespace ETKMediaInfoBridge
                 return;
             }
 
-            EtkMetadataPayload payload;
-            if (string.Equals(itemType, "BoxSet", StringComparison.Ordinal))
+            EtkMetadataPayload payload = null;
+            if (!allowCachedImageSync)
             {
-                item.ProviderIds.TryGetValue("Tmdb", out var tmdbId);
-                payload = await EtkMetadataClient.GetCollectionAsync(
-                    this.jsonSerializer,
-                    this.libraryManager,
-                    tmdbId,
-                    cancellationToken).ConfigureAwait(false);
-            }
-            else
-            {
-                payload = await EtkMetadataClient.GetAsync(
-                    this.jsonSerializer,
-                    item.Path,
-                    itemType,
-                    string.Equals(itemType, "Season", StringComparison.Ordinal)
-                        ? EtkMetadataClient.ResolveSeasonNumber(item.Path, item.IndexNumber)
-                        : item.ParentIndexNumber,
-                    string.Equals(itemType, "Episode", StringComparison.Ordinal) ? item.IndexNumber : null,
-                    cancellationToken,
-                    this.libraryManager).ConfigureAwait(false);
+                if (string.Equals(itemType, "BoxSet", StringComparison.Ordinal))
+                {
+                    item.ProviderIds.TryGetValue("Tmdb", out var tmdbId);
+                    payload = await EtkMetadataClient.GetCollectionAsync(
+                        this.jsonSerializer,
+                        this.libraryManager,
+                        tmdbId,
+                        cancellationToken,
+                        cacheOnlyImages: true).ConfigureAwait(false);
+                }
+                else
+                {
+                    payload = await EtkMetadataClient.GetAsync(
+                        this.jsonSerializer,
+                        item.Path,
+                        itemType,
+                        string.Equals(itemType, "Season", StringComparison.Ordinal)
+                            ? EtkMetadataClient.ResolveSeasonNumber(item.Path, item.IndexNumber)
+                            : item.ParentIndexNumber,
+                        string.Equals(itemType, "Episode", StringComparison.Ordinal) ? item.IndexNumber : null,
+                        cancellationToken,
+                        this.libraryManager,
+                        cacheOnlyImages: true).ConfigureAwait(false);
+                }
             }
             var libraryOptions = this.libraryManager.GetLibraryOptions(item);
             var rules = EtkImagePolicy.GetRules(item, libraryOptions);
@@ -1018,29 +1405,33 @@ namespace ETKMediaInfoBridge
                     itemId);
             }
 
-            item.ProviderIds.TryGetValue("Tmdb", out var imageTmdbId);
-            var synced = await EtkMetadataClient.SyncImagesAsync(
-                this.jsonSerializer,
-                item.Path,
-                itemType,
-                string.Equals(itemType, "Season", StringComparison.Ordinal)
-                    ? EtkMetadataClient.ResolveSeasonNumber(item.Path, item.IndexNumber)
-                    : item.ParentIndexNumber,
-                string.Equals(itemType, "Episode", StringComparison.Ordinal)
-                    ? item.IndexNumber
-                    : null,
-                imageTmdbId,
-                rules,
-                refreshPolicy,
-                cancellationToken,
-                this.libraryManager,
-                this.logger).ConfigureAwait(false);
+            EtkImageSyncResponse synced = null;
+            if (allowCachedImageSync)
+            {
+                item.ProviderIds.TryGetValue("Tmdb", out var imageTmdbId);
+                synced = await EtkMetadataClient.SyncImagesAsync(
+                    this.jsonSerializer,
+                    item.Path,
+                    itemType,
+                    string.Equals(itemType, "Season", StringComparison.Ordinal)
+                        ? EtkMetadataClient.ResolveSeasonNumber(item.Path, item.IndexNumber)
+                        : item.ParentIndexNumber,
+                    string.Equals(itemType, "Episode", StringComparison.Ordinal)
+                        ? item.IndexNumber
+                        : null,
+                    imageTmdbId,
+                    rules,
+                    refreshPolicy,
+                    cancellationToken,
+                    this.libraryManager,
+                    this.logger).ConfigureAwait(false);
+            }
             if (rules.Length == 0)
             {
                 return;
             }
             var candidates = synced?.images;
-            if (candidates == null || candidates.Length == 0)
+            if ((candidates == null || candidates.Length == 0) && !allowCachedImageSync)
             {
                 candidates = EtkImagePolicy.FromCached(payload?.images);
             }
