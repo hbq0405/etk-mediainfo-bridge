@@ -692,7 +692,7 @@ namespace ETKMediaInfoBridge
                 this.libraryManager.GetLibraryOptions(item));
             var downloadedCounts = imageRules.ToDictionary(
                 rule => rule.Type,
-                rule => item.GetImages(rule.Type).Count());
+                rule => item.GetImages(rule.Type).Count(image => image.IsLocalFile));
             var refreshed = EtkMetadataClient.RefreshImagesAsync(
                     this.jsonSerializer,
                     item.Path,
@@ -820,7 +820,7 @@ namespace ETKMediaInfoBridge
                 ExpiresAt = DateTime.UtcNow.AddMinutes(10),
                 DownloadedCounts = downloadedCounts ?? rules.ToDictionary(
                     rule => rule.Type,
-                    rule => item.GetImages(rule.Type).Count()),
+                    rule => item.GetImages(rule.Type).Count(image => image.IsLocalFile)),
                 PolicyRefreshed = policyRefreshed
             };
         }
@@ -1442,30 +1442,40 @@ namespace ETKMediaInfoBridge
             {
                 var downloadLimit = rule.Limit;
                 if (libraryOptions != null
-                    && !libraryOptions.DownloadImagesInAdvance
-                    && rule.Type != ImageType.Primary)
+                    && !libraryOptions.DownloadImagesInAdvance)
                 {
-                    if (!replaceExisting
-                        || downloadedCounts == null
-                        || !downloadedCounts.TryGetValue(rule.Type, out var downloadedCount))
-                    {
-                        continue;
-                    }
-                    downloadLimit = Math.Min(downloadLimit, downloadedCount);
+                    downloadLimit = replaceExisting
+                        && downloadedCounts != null
+                        && downloadedCounts.TryGetValue(rule.Type, out var downloadedCount)
+                            ? Math.Min(downloadLimit, downloadedCount)
+                            : 0;
                 }
                 var index = 0;
                 foreach (var image in selected
                     .Where(value => value.Type == rule.Type)
-                    .Take(downloadLimit))
+                    .Take(rule.Limit))
                 {
-                    restored += await this.SaveImageAsync(
-                        item,
-                        libraryOptions,
-                        image.Url,
-                        rule.Type,
-                        rule.Type == ImageType.Backdrop ? index : (int?)null,
-                        replaceExisting,
-                        cancellationToken).ConfigureAwait(false);
+                    var imageIndex = rule.Type == ImageType.Backdrop ? index : (int?)null;
+                    if (index < downloadLimit)
+                    {
+                        restored += await this.SaveImageAsync(
+                            item,
+                            libraryOptions,
+                            image.Url,
+                            rule.Type,
+                            imageIndex,
+                            replaceExisting,
+                            cancellationToken).ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        restored += this.SaveImageStub(
+                            item,
+                            image.Url,
+                            rule.Type,
+                            imageIndex,
+                            replaceExisting);
+                    }
                     index++;
                 }
             }
@@ -1546,6 +1556,41 @@ namespace ETKMediaInfoBridge
             {
                 this.logger.ErrorException(
                     "ETK Images failed to restore " + imageType + " for Item " + item.InternalId,
+                    ex);
+                return 0;
+            }
+        }
+
+        private int SaveImageStub(
+            BaseItem item,
+            string url,
+            ImageType imageType,
+            int? imageIndex,
+            bool replaceExisting)
+        {
+            var index = imageIndex ?? 0;
+            if (string.IsNullOrWhiteSpace(url)
+                || (!replaceExisting && item.HasImage(imageType, index)))
+            {
+                return 0;
+            }
+
+            try
+            {
+                MediaInfoRefreshGuard.Suppress(item.InternalId);
+                item.SetImage(new ItemImageInfo
+                {
+                    Path = url,
+                    Type = imageType,
+                    DateModified = DateTimeOffset.UtcNow
+                }, index, replaceExisting);
+                item.UpdateToRepository(ItemUpdateType.ImageUpdate);
+                return 1;
+            }
+            catch (Exception ex)
+            {
+                this.logger.ErrorException(
+                    "ETK Images failed to restore lazy " + imageType + " for Item " + item.InternalId,
                     ex);
                 return 0;
             }
