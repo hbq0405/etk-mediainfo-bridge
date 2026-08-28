@@ -321,7 +321,31 @@ namespace ETKMediaInfoBridge
         {
             var mediaInfoUrl = ResolveMediaInfoUrl(itemPath);
             string url;
-            if (!string.IsNullOrEmpty(mediaInfoUrl))
+            // Cache-only image refreshes must use the physical-path metadata
+            // endpoint so ETKN can restore persisted episode screenshots by
+            // TMDb series/season/episode identity. The p115 endpoint only
+            // returns the raw metadata snapshot and has no image archive data.
+            if (cacheOnlyImages)
+            {
+                var origin = ResolveEtkOrigin(libraryManager);
+                if (string.IsNullOrEmpty(origin) && !string.IsNullOrEmpty(mediaInfoUrl))
+                {
+                    origin = new Uri(mediaInfoUrl).GetLeftPart(UriPartial.Authority);
+                }
+                if (string.IsNullOrEmpty(origin))
+                {
+                    return null;
+                }
+                url = BuildPhysicalMetadataUrl(
+                    origin,
+                    itemPath,
+                    itemType,
+                    seasonNumber,
+                    episodeNumber,
+                    includeImages,
+                    cacheOnlyImages);
+            }
+            else if (!string.IsNullOrEmpty(mediaInfoUrl))
             {
                 RememberEtkOrigin(mediaInfoUrl);
                 url = BuildMetadataUrl(
