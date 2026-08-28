@@ -213,7 +213,9 @@ namespace ETKMediaInfoBridge
             }
         }
 
-        public static EtkRemoteImageCandidate[] FromCached(EtkMetadataImages images)
+        public static EtkRemoteImageCandidate[] FromCached(
+            EtkMetadataImages images,
+            bool episodeScreenshotFallback = false)
         {
             if (images == null)
             {
@@ -221,6 +223,10 @@ namespace ETKMediaInfoBridge
             }
             var candidates = new List<EtkRemoteImageCandidate>();
             Add(candidates, images.primary, ImageType.Primary);
+            if (episodeScreenshotFallback && string.IsNullOrWhiteSpace(images.primary))
+            {
+                Add(candidates, images.backdrop, ImageType.Primary);
+            }
             Add(candidates, images.backdrop, ImageType.Art);
             Add(candidates, images.backdrop, ImageType.Backdrop);
             Add(candidates, images.backdrop, ImageType.Banner);

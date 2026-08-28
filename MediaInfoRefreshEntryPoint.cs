@@ -1439,7 +1439,9 @@ namespace ETKMediaInfoBridge
             var candidates = synced?.images;
             if ((candidates == null || candidates.Length == 0) && !allowCachedImageSync)
             {
-                candidates = EtkImagePolicy.FromCached(payload?.images);
+                candidates = EtkImagePolicy.FromCached(
+                    payload?.images,
+                    item is Episode);
             }
 
             var restored = 0;
