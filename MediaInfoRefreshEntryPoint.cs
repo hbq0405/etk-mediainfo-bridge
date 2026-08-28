@@ -1397,11 +1397,12 @@ namespace ETKMediaInfoBridge
             var libraryOptions = this.libraryManager.GetLibraryOptions(item);
             var rules = EtkImagePolicy.GetRules(item, libraryOptions);
             this.logger.Info(
-                "ETK Images restore planning for Item {0}: type={1}, cacheOnly={2}, rules={3}.",
+                "ETK Images restore planning for Item {0}: type={1}, cacheOnly={2}, rules={3}:{4}.",
                 itemId,
                 itemType,
                 !allowCachedImageSync,
-                rules.Length);
+                rules.Length,
+                string.Join(",", rules.Select(rule => rule.Type + "/" + rule.Limit + "/" + rule.MinWidth)));
             var removed = this.PruneImages(item, rules);
             if (removed > 0)
             {
@@ -1448,10 +1449,11 @@ namespace ETKMediaInfoBridge
             var cacheOnlyRestore = !allowCachedImageSync;
             var selected = EtkImagePolicy.Apply(candidates, rules, "ETK Images").ToArray();
             this.logger.Info(
-                "ETK Images restore candidates for Item {0}: payload={1}, synced={2}, selected={3}.",
+                "ETK Images restore candidates for Item {0}: payload={1}, synced={2}, candidates={3}, selected={4}.",
                 itemId,
                 payload?.images == null ? 0 : 1,
                 synced?.images == null ? 0 : synced.images.Length,
+                string.Join(",", (candidates ?? Array.Empty<EtkRemoteImageCandidate>()).Select(candidate => candidate.type)),
                 selected.Length);
             foreach (var rule in rules)
             {
