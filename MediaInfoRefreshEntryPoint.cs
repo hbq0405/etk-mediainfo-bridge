@@ -1443,6 +1443,7 @@ namespace ETKMediaInfoBridge
             }
 
             var restored = 0;
+            var cacheOnlyRestore = !allowCachedImageSync;
             var selected = EtkImagePolicy.Apply(candidates, rules, "ETK Images").ToArray();
             this.logger.Info(
                 "ETK Images restore candidates for Item {0}: payload={1}, synced={2}, selected={3}.",
@@ -1453,7 +1454,8 @@ namespace ETKMediaInfoBridge
             foreach (var rule in rules)
             {
                 var downloadLimit = rule.Limit;
-                if (libraryOptions != null
+                if (!cacheOnlyRestore
+                    && libraryOptions != null
                     && !libraryOptions.DownloadImagesInAdvance)
                 {
                     downloadLimit = replaceExisting
