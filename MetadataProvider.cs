@@ -87,6 +87,7 @@ namespace ETKMediaInfoBridge
         public string type { get; set; }
         public string url { get; set; }
         public string thumbnail_url { get; set; }
+        public string source_provider { get; set; }
         public string language { get; set; }
         public int? width { get; set; }
         public int? height { get; set; }
@@ -127,6 +128,20 @@ namespace ETKMediaInfoBridge
 
     internal static class EtkImagePolicy
     {
+        internal static string ProviderLabel(string sourceProvider, string fallback)
+        {
+            var normalized = (sourceProvider ?? string.Empty).Trim().ToLowerInvariant();
+            if (normalized == "tmdb")
+            {
+                return "ETKN-TMDb";
+            }
+            if (normalized == "fanart")
+            {
+                return "ETKN-Fanart";
+            }
+            return fallback;
+        }
+
         private static readonly ImageType[] SupportedTypes =
         {
             ImageType.Primary,
@@ -192,7 +207,7 @@ namespace ETKMediaInfoBridge
                     }
                     yield return new RemoteImageInfo
                     {
-                        ProviderName = providerName,
+                        ProviderName = ProviderLabel(candidate.source_provider, providerName),
                         Url = candidate.url,
                         ThumbnailUrl = string.IsNullOrWhiteSpace(candidate.thumbnail_url)
                             ? candidate.url
@@ -1429,7 +1444,7 @@ namespace ETKMediaInfoBridge
         {
             return new RemoteImageInfo
             {
-                ProviderName = this.Name,
+                ProviderName = EtkImagePolicy.ProviderLabel(candidate.source_provider, this.Name),
                 Url = candidate.url,
                 ThumbnailUrl = string.IsNullOrWhiteSpace(candidate.thumbnail_url)
                     ? candidate.url
