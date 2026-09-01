@@ -691,6 +691,10 @@ namespace ETKMediaInfoBridge
                 streams.Add(externalStream);
                 preservedExternalStreamCount++;
             }
+            foreach (var stream in streams.Where(stream => stream.Type == MediaStreamType.Video && !stream.IsExternal))
+            {
+                ApplyExtendedVideoType(stream);
+            }
             itemRepository.SaveMediaStreams(
                 item.InternalId,
                 new List<MediaStream>(),
@@ -786,6 +790,41 @@ namespace ETKMediaInfoBridge
                 ChapterCount = existingChapters.Count,
                 PreservedExternalStreamCount = preservedExternalStreamCount
             };
+        }
+
+        private static void ApplyExtendedVideoType(MediaStream stream)
+        {
+            if (stream.ExtendedVideoType == ExtendedVideoTypes.DolbyVision)
+            {
+                return;
+            }
+
+            var display = " " + string.Join(" ", new[]
+            {
+                stream.DisplayTitle,
+                stream.ExtendedVideoSubTypeDescription
+            }.Where(value => !string.IsNullOrWhiteSpace(value))).ToUpperInvariant() + " ";
+            var transfer = (stream.ColorTransfer ?? string.Empty).Trim();
+
+            if (display.Contains("HDR10+"))
+            {
+                stream.ExtendedVideoType = ExtendedVideoTypes.Hdr10Plus;
+                stream.ExtendedVideoSubType = ExtendedVideoSubTypes.Hdr10Plus0;
+            }
+            else if (transfer.Equals("arib-std-b67", StringComparison.OrdinalIgnoreCase)
+                || display.Contains(" HLG ")
+                || display.Contains("HYPERLOGGAMMA"))
+            {
+                stream.ExtendedVideoType = ExtendedVideoTypes.HyperLogGamma;
+                stream.ExtendedVideoSubType = ExtendedVideoSubTypes.HyperLogGamma;
+            }
+            else if (transfer.Equals("smpte2084", StringComparison.OrdinalIgnoreCase)
+                || display.Contains("HDR10")
+                || display.Contains(" HDR "))
+            {
+                stream.ExtendedVideoType = ExtendedVideoTypes.Hdr10;
+                stream.ExtendedVideoSubType = ExtendedVideoSubTypes.Hdr10;
+            }
         }
 
         private static bool IsSameExternalStream(MediaStream left, MediaStream right)
