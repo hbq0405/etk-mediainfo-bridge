@@ -314,6 +314,7 @@ namespace ETKMediaInfoBridge
                 this.applicationPaths.PluginConfigurationsPath,
                 this.logger);
             DeepDeleteInterceptor.Install(this.libraryManager, this.jsonSerializer, this.logger);
+            MediaSourceDisplayInterceptor.Install(this.libraryManager, this.jsonSerializer, this.logger);
             ManualImageSearchInterceptor.Install(this.logger);
             RefreshItemInterceptor.Install(
                 this.OnRefreshStarting,
@@ -1659,6 +1660,7 @@ namespace ETKMediaInfoBridge
             DiscoveryAddressInterceptor.Uninstall();
             ManualImageSearchInterceptor.Uninstall();
             DeepDeleteInterceptor.Uninstall();
+            MediaSourceDisplayInterceptor.Uninstall();
             this.libraryManager.ItemAdded -= this.OnItemAdded;
             this.libraryManager.ItemUpdated -= this.OnItemUpdated;
             this.taskManager.TaskCompleted -= this.OnTaskCompleted;

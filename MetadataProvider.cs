@@ -82,6 +82,15 @@ namespace ETKMediaInfoBridge
         public EtkMetadataImages images { get; set; }
     }
 
+    internal sealed class EtkVersionDisplayPayload
+    {
+        public long media_version_id { get; set; }
+        public string slot_id { get; set; }
+        public string slot_name { get; set; }
+        public int slot_order { get; set; }
+        public int? washing_level { get; set; }
+    }
+
     internal sealed class EtkRemoteImageCandidate
     {
         public string type { get; set; }
@@ -321,6 +330,30 @@ namespace ETKMediaInfoBridge
         public static string GetEtkOrigin(ILibraryManager libraryManager)
         {
             return ResolveEtkOrigin(libraryManager);
+        }
+
+        public static async Task<EtkVersionDisplayPayload> GetVersionDisplayAsync(
+            IJsonSerializer serializer,
+            ILibraryManager libraryManager,
+            string sourcePath,
+            CancellationToken cancellationToken)
+        {
+            var origin = ResolveEtkOrigin(libraryManager);
+            if (string.IsNullOrEmpty(origin) || string.IsNullOrWhiteSpace(sourcePath))
+            {
+                return null;
+            }
+            var url = origin + "/api/emby/metadata/version-display?path="
+                + Uri.EscapeDataString(sourcePath);
+            using (var response = await HttpClient.GetAsync(url, cancellationToken).ConfigureAwait(false))
+            {
+                if (!response.IsSuccessStatusCode)
+                {
+                    return null;
+                }
+                var json = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                return serializer.DeserializeFromString<EtkVersionDisplayPayload>(json);
+            }
         }
 
         public static async Task<EtkMetadataPayload> GetAsync(
